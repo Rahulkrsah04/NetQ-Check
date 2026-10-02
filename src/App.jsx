@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './contexts/AuthContext';
 import { PublicLayout, DashboardLayout } from './layouts/AppLayouts';
@@ -21,7 +21,7 @@ import Settings from './pages/Settings';
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
+      <Router>
         <Routes>
           {/* Public Routes */}
           <Route element={<PublicLayout />}>
@@ -69,7 +69,7 @@ export default function App() {
             },
           }}
         />
-      </BrowserRouter>
+      </Router>
     </AuthProvider>
   );
 }
