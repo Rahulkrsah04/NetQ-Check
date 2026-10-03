@@ -1,11 +1,17 @@
 import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Camera, Upload, Info, AlertCircle, CheckCircle, Edit3, PlayCircle, ArrowRight, Layers, Sparkles } from 'lucide-react';
+import { Camera, Upload, Info, AlertCircle, CheckCircle, Edit3, PlayCircle, ArrowRight, Layers, Sparkles, PackageCheck, PlusCircle } from 'lucide-react';
 import { UploadBox, CaptureBox } from '../components/ui/UploadBox';
 import { ProgressStepper, ConfidenceBar } from '../components/ui/ProgressStepper';
 import Button from '../components/ui/Button';
 import { useOCR } from '../hooks/useOCR';
 import { PRODUCT_CATEGORIES, detectCategoryFromText } from '../services/ruleEngine/productCategories';
+import { findMatchingProducts } from '../services/products/productMatcher';
+import { saveProduct } from '../services/repositories/productRepository';
+import { createScan } from '../services/repositories/scanRepository';
+import { saveAssessment } from '../services/repositories/assessmentRepository';
+import { saveEvidenceItems } from '../services/repositories/evidenceRepository';
+import { useAuth } from '../contexts/AuthContext';
 import toast from 'react-hot-toast';
 
 const PROCESS_STEPS = [
@@ -39,15 +45,21 @@ export default function ScanProduct() {
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [editedData, setEditedData] = useState({});
-  const [stepStatuses, setStepStatuses] = useState({});
   const [selectedCategory, setSelectedCategory] = useState('GENERAL_PACKAGED');
+  const [matchedProducts, setMatchedProducts] = useState([]);
+  const [selectedProductId, setSelectedProductId] = useState(null);
+  const [isCreatingNewProduct, setIsCreatingNewProduct] = useState(false);
 
   const { processing, progress, ocrResult, error, stage, startScan, runCompliance, reset } = useOCR();
+  const { user } = useAuth();
   const navigate = useNavigate();
 
   const handleFileSelect = useCallback((file) => {
     setImageFile(file);
     setImagePreview(URL.createObjectURL(file));
+    setMatchedProducts([]);
+    setSelectedProductId(null);
+    setIsCreatingNewProduct(false);
     reset();
   }, [reset]);
 
@@ -64,8 +76,10 @@ export default function ScanProduct() {
     setImageFile(null);
     setImagePreview(null);
     setEditedData({});
-    setStepStatuses({});
     setSelectedCategory('GENERAL_PACKAGED');
+    setMatchedProducts([]);
+    setSelectedProductId(null);
+    setIsCreatingNewProduct(false);
     reset();
   };
 
@@ -74,8 +88,18 @@ export default function ScanProduct() {
       toast.error('Please upload or capture a product label image first.');
       return;
     }
-    setStepStatuses({});
-    await startScan(imageFile);
+    const res = await startScan(imageFile);
+    if (res && res.extractedData) {
+      const matches = findMatchingProducts({
+        productName: res.extractedData.productName?.value,
+        manufacturerName: res.extractedData.manufacturer?.value,
+        categoryId: selectedCategory,
+      });
+      setMatchedProducts(matches);
+      if (matches.length > 0) {
+        setSelectedProductId(matches[0].product.productId);
+      }
+    }
   };
 
   const handleAutoDetectCategory = () => {
@@ -99,9 +123,82 @@ export default function ScanProduct() {
     Object.keys(FIELD_LABELS).forEach(key => {
       finalData[key] = editedData[key] ?? extracted[key] ?? { value: null, confidence: 0 };
     });
+
     const result = runCompliance(finalData, selectedCategory);
-    // Navigate to result page with full assessment data
-    navigate('/result/new', { state: { extractedData: finalData, complianceResult: result, imageUrl: imagePreview, categoryId: selectedCategory } });
+
+    // Save or resolve Master Product
+    let activeProduct = null;
+    if (selectedProductId && !isCreatingNewProduct) {
+      activeProduct = saveProduct({
+        productId: selectedProductId,
+        lastScannedAt: new Date().toISOString(),
+        latestStatus: result.overallStatus,
+        incrementScanCount: true,
+      }, user);
+    } else {
+      activeProduct = saveProduct({
+        productName: finalData.productName?.value || 'New Packaged Commodity',
+        categoryId: selectedCategory,
+        manufacturer: finalData.manufacturer?.value || 'Unknown Manufacturer',
+        brand: finalData.productName?.value?.split(' ')[0] || 'Generic',
+        image: imagePreview,
+        latestStatus: result.overallStatus,
+        incrementScanCount: true,
+      }, user);
+    }
+
+    // Save Scan Record
+    const scanRecord = createScan({
+      productId: activeProduct.productId,
+      images: [imagePreview],
+      rawOCRData: ocrResult?.rawOCRData || { text: ocrResult?.rawText },
+      normalizedData: finalData,
+      category: selectedCategory,
+      status: result.overallStatus,
+      ruleSetVersion: result.ruleSetVersion || 'PC_RULES_2011_V1',
+      engineVersion: result.engineVersion || '3.0.0',
+    }, user);
+
+    // Save Assessment Record
+    const assessmentRecord = saveAssessment({
+      scanId: scanRecord.scanId,
+      productId: activeProduct.productId,
+      overallStatus: result.overallStatus,
+      summary: result.summary,
+      checks: result.checks || result.results,
+      issues: result.issues || [],
+      reviewItems: result.reviewItems || [],
+      ruleSetVersion: result.ruleSetVersion || 'PC_RULES_2011_V1',
+      engineVersion: result.engineVersion || '3.0.0',
+    }, user);
+
+    // Save Field Evidence Items
+    const evidenceList = Object.entries(finalData).map(([field, val]) => ({
+      field,
+      rawValue: val.value || '',
+      normalizedValue: val.normalizedValue || val.value || '',
+      confidence: val.confidence || 0,
+      source: 'OCR_VISION',
+      imageRegion: { x: 10, y: 10, width: 100, height: 50 },
+    }));
+    saveEvidenceItems(scanRecord.scanId, evidenceList);
+
+    toast.success('Inspection record persisted successfully!');
+
+    // Navigate to assessment view
+    navigate(`/result/${assessmentRecord.assessmentId}`, {
+      state: {
+        extractedData: finalData,
+        complianceResult: {
+          ...result,
+          assessmentId: assessmentRecord.assessmentId,
+          scanId: scanRecord.scanId,
+          productId: activeProduct.productId,
+        },
+        imageUrl: imagePreview,
+        categoryId: selectedCategory,
+      },
+    });
   };
 
   return (
@@ -226,6 +323,83 @@ export default function ScanProduct() {
       {/* OCR Extraction Review */}
       {(stage === 'review' || stage === 'done') && ocrResult && (
         <div className="space-y-4">
+
+          {/* EXISTING PRODUCT DETECTION PROMPT */}
+          {matchedProducts.length > 0 && (
+            <div className="card bg-amber-50/60 border-2 border-amber-300 dark:border-amber-700/50 p-4">
+              <div className="flex items-start gap-3">
+                <PackageCheck className="w-6 h-6 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <h3 className="text-sm font-bold text-amber-950 flex items-center gap-2">
+                    Existing product detected
+                    <span className="text-[11px] bg-amber-200 text-amber-900 font-semibold px-2 py-0.5 rounded-full">
+                      {matchedProducts.length} Match Found
+                    </span>
+                  </h3>
+                  <p className="text-xs text-amber-800 mt-1">
+                    This scan matches existing products in the master catalog. Choose to link this scan to an existing product or register as a new product.
+                  </p>
+
+                  <div className="mt-3 space-y-2">
+                    {matchedProducts.map(({ product, confidence, matchReasons }) => (
+                      <div
+                        key={product.productId}
+                        className={`p-3 rounded-lg border text-xs flex items-center justify-between transition-all ${
+                          selectedProductId === product.productId && !isCreatingNewProduct
+                            ? 'bg-white border-teal-600 shadow-sm ring-1 ring-teal-600'
+                            : 'bg-amber-100/50 border-amber-200 hover:bg-white'
+                        }`}
+                      >
+                        <div>
+                          <div className="font-bold text-slate-900">{product.productName}</div>
+                          <div className="text-[11px] text-slate-600">
+                            Manufacturer: {product.manufacturer} · Category: {product.categoryId}
+                          </div>
+                          <div className="text-[10px] text-teal-700 font-medium mt-0.5">
+                            {matchReasons.join(' · ')} ({Math.round(confidence * 100)}% match)
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => {
+                            setSelectedProductId(product.productId);
+                            setIsCreatingNewProduct(false);
+                            toast.success(`Selected: ${product.productName}`);
+                          }}
+                          className={`px-3 py-1.5 rounded-md font-semibold text-xs transition ${
+                            selectedProductId === product.productId && !isCreatingNewProduct
+                              ? 'bg-teal-700 text-white'
+                              : 'bg-white border border-slate-300 text-slate-700 hover:bg-teal-50'
+                          }`}
+                        >
+                          {selectedProductId === product.productId && !isCreatingNewProduct ? 'Use Existing Product (Selected)' : 'Use Existing Product'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 pt-2 border-t border-amber-200 flex items-center justify-between">
+                    <span className="text-xs text-slate-600 font-medium">Or register as an independent new product:</span>
+                    <button
+                      onClick={() => {
+                        setIsCreatingNewProduct(true);
+                        toast.success('Will create a new master product entry upon confirmation.');
+                      }}
+                      className={`px-3 py-1.5 rounded-md font-semibold text-xs flex items-center gap-1.5 transition ${
+                        isCreatingNewProduct
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      <PlusCircle className="w-3.5 h-3.5" />
+                      {isCreatingNewProduct ? 'Create New Product (Selected)' : 'Create New Product'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="card">
             <div className="flex items-start justify-between mb-4 flex-wrap gap-2">
               <div>

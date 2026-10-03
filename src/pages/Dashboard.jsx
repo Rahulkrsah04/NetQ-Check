@@ -1,11 +1,18 @@
+// ============================================================
+// NetQ Check — Executive Inspection Dashboard
+// Real database-derived stats, charts & recent inspection records
+// ============================================================
+
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Camera, TrendingUp, Package,
-  ArrowRight, Clock, CheckCircle, XCircle, AlertTriangle, ShieldCheck
+  ArrowRight, Clock, CheckCircle, XCircle, AlertTriangle, ShieldCheck, PieChart as PieIcon, Eye, ToggleLeft, ToggleRight
 } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { StatusBadge } from '../components/ui/StatusBadge';
-import { DEMO_SCANS, DEMO_STATS, CHART_DATA } from '../data/mockData';
+import { getDashboardMetrics } from '../services/analytics/dashboardAnalyticsService';
+import { DEMO_SCANS, CHART_DATA } from '../data/mockData';
 import { useAuth } from '../contexts/AuthContext';
 import { format } from 'date-fns';
 
@@ -16,46 +23,26 @@ const getGreeting = () => {
   return 'Good Evening 👋';
 };
 
-const STAT_CARDS = [
-  {
-    label: 'Products Scanned',
-    value: DEMO_STATS.totalScans,
-    icon: Camera,
-    iconBg: 'bg-blue-100 text-blue-700',
-    delta: '+12 this month',
-    deltaColor: 'text-green-600',
-  },
-  {
-    label: 'Compliant',
-    value: DEMO_STATS.compliant,
-    icon: CheckCircle,
-    iconBg: 'bg-green-100 text-success',
-    delta: `${Math.round((DEMO_STATS.compliant / DEMO_STATS.totalScans) * 100)}% pass rate`,
-    deltaColor: 'text-green-600',
-  },
-  {
-    label: 'Non-Compliant',
-    value: DEMO_STATS.nonCompliant,
-    icon: XCircle,
-    iconBg: 'bg-red-100 text-error',
-    delta: `${Math.round((DEMO_STATS.nonCompliant / DEMO_STATS.totalScans) * 100)}% of scans`,
-    deltaColor: 'text-red-600',
-  },
-  {
-    label: 'Needs Review',
-    value: DEMO_STATS.needsReview,
-    icon: AlertTriangle,
-    iconBg: 'bg-amber-100 text-warning',
-    delta: 'Manual check required',
-    deltaColor: 'text-amber-600',
-  },
-];
-
 export default function Dashboard() {
   const { user } = useAuth();
+  const [demoMode, setDemoMode] = useState(false);
+
+  const metrics = getDashboardMetrics();
+
+  const statCards = demoMode ? [
+    { label: 'Total Products', value: 3, icon: Package, iconBg: 'bg-blue-100 text-blue-700', delta: 'Demo Catalog' },
+    { label: 'Compliant Scans', value: 1, icon: CheckCircle, iconBg: 'bg-green-100 text-teal-700', delta: '33% Pass Rate' },
+    { label: 'Non-Compliant Scans', value: 1, icon: XCircle, iconBg: 'bg-red-100 text-red-700', delta: '33% Failure Rate' },
+    { label: 'Needs Review', value: 1, icon: AlertTriangle, iconBg: 'bg-amber-100 text-amber-700', delta: '33% Pending Review' },
+  ] : [
+    { label: 'Total Products', value: metrics.totalProducts, icon: Package, iconBg: 'bg-blue-100 text-blue-700', delta: 'Registered Products' },
+    { label: 'Compliant Scans', value: metrics.compliantCount, icon: CheckCircle, iconBg: 'bg-green-100 text-teal-700', delta: `${metrics.complianceRate}% Pass Rate` },
+    { label: 'Non-Compliant Scans', value: metrics.nonCompliantCount, icon: XCircle, iconBg: 'bg-red-100 text-red-700', delta: 'Mandatory Non-Compliance' },
+    { label: 'Needs Review', value: metrics.needsReviewCount, icon: AlertTriangle, iconBg: 'bg-amber-100 text-amber-700', delta: 'Officer Review Required' },
+  ];
 
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in space-y-6">
       {/* Page Header */}
       <div className="page-header">
         <div>
@@ -65,17 +52,35 @@ export default function Dashboard() {
           <h1 className="page-title">
             {user?.displayName ? `Welcome, ${user.displayName}` : 'Compliance Overview'}
           </h1>
-          <p className="page-desc">Monitor product compliance status and recent scan activity under Legal Metrology Rules</p>
+          <p className="page-desc">
+            Platform Inspection Analytics & Mandatory Declarations Intelligence ({user?.role || 'INSPECTOR'})
+          </p>
         </div>
-        <Link to="/scan" id="dashboard-scan-btn" className="btn btn-primary shadow-sm">
-          <Camera className="w-4 h-4" />
-          New Scan
-        </Link>
+
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Demo Mode Toggle */}
+          <button
+            onClick={() => setDemoMode(!demoMode)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition ${
+              demoMode
+                ? 'bg-purple-50 text-purple-800 border-purple-300'
+                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+            }`}
+          >
+            {demoMode ? <ToggleRight className="w-4 h-4 text-purple-600" /> : <ToggleLeft className="w-4 h-4 text-slate-400" />}
+            {demoMode ? 'Demo Mode Active' : 'Live Platform Data'}
+          </button>
+
+          <Link to="/scan" id="dashboard-scan-btn" className="btn btn-primary shadow-sm flex items-center gap-1.5">
+            <Camera className="w-4 h-4" />
+            New Inspection Scan
+          </Link>
+        </div>
       </div>
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        {STAT_CARDS.map((stat, i) => (
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {statCards.map((stat, i) => (
           <div key={i} className="stat-card card">
             <div className="flex items-start justify-between">
               <div>
@@ -86,35 +91,38 @@ export default function Dashboard() {
                 <stat.icon className="w-5 h-5" />
               </div>
             </div>
-            <div className={`text-xs font-medium ${stat.deltaColor}`}>{stat.delta}</div>
+            <div className="text-xs font-medium text-slate-500 mt-2">{stat.delta}</div>
           </div>
         ))}
       </div>
 
       {/* Content Grid */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-        {/* Chart */}
+        {/* Compliance Trend Chart */}
         <div className="xl:col-span-2 card">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
             <div>
-              <h2 className="section-title text-base">Compliance Trend</h2>
-              <p className="section-subtitle">Monthly scan results (last 6 months)</p>
+              <h2 className="section-title text-base">Compliance Trend Analytics</h2>
+              <p className="section-subtitle">Monthly inspection outcomes distribution</p>
             </div>
             <div className="flex gap-3 text-xs">
-              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-success inline-block" /> Compliant</span>
-              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-error inline-block" /> Non-Compliant</span>
-              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-warning inline-block" /> Needs Review</span>
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-teal-600 inline-block" /> Compliant</span>
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-red-600 inline-block" /> Non-Compliant</span>
+              <span className="flex items-center gap-1"><span className="w-2.5 h-2.5 rounded-sm bg-amber-500 inline-block" /> Needs Review</span>
             </div>
           </div>
+
           <ResponsiveContainer width="100%" height={220}>
-            <BarChart data={CHART_DATA} barSize={14}>
+            <BarChart data={demoMode ? CHART_DATA : [
+              { month: 'Current', compliant: metrics.compliantCount, nonCompliant: metrics.nonCompliantCount, review: metrics.needsReviewCount }
+            ]} barSize={18}>
               <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
               <XAxis dataKey="month" tick={{ fontSize: 11, fill: '#6B7280' }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: '#6B7280' }} axisLine={false} tickLine={false} />
               <Tooltip
                 contentStyle={{ fontSize: 12, border: '1px solid #E5E7EB', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}
               />
-              <Bar dataKey="compliant" fill="#16A34A" radius={[3, 3, 0, 0]} name="Compliant" />
+              <Bar dataKey="compliant" fill="#0F766E" radius={[3, 3, 0, 0]} name="Compliant" />
               <Bar dataKey="nonCompliant" fill="#DC2626" radius={[3, 3, 0, 0]} name="Non-Compliant" />
               <Bar dataKey="review" fill="#F59E0B" radius={[3, 3, 0, 0]} name="Needs Review" />
             </BarChart>
@@ -123,94 +131,95 @@ export default function Dashboard() {
 
         {/* Quick Actions */}
         <div className="card">
-          <h2 className="section-title text-base mb-4">Quick Actions</h2>
+          <h2 className="section-title text-base mb-4">Quick Platform Actions</h2>
           <div className="space-y-2">
             {[
-              { to: '/scan', icon: Camera, label: 'Scan New Product', desc: 'Upload or capture a label', color: 'text-primary bg-teal-50' },
-              { to: '/history', icon: Clock, label: 'View Scan History', desc: 'Browse past scans', color: 'text-blue-700 bg-blue-50' },
-              { to: '/reports', icon: Package, label: 'Download Reports', desc: 'Export compliance PDFs', color: 'text-success bg-green-50' },
-              { to: '/rules', icon: ShieldCheck, label: 'Compliance Rules', desc: 'Legal Metrology checklist', color: 'text-teal-800 bg-teal-100/60' },
+              { to: '/scan', icon: Camera, label: 'Scan Commodity', desc: 'Upload or capture label', color: 'text-teal-700 bg-teal-50' },
+              { to: '/history', icon: Clock, label: 'Inspection History', desc: 'Browse database records', color: 'text-blue-700 bg-blue-50' },
+              { to: '/products', icon: Package, label: 'Products Master Catalog', desc: 'View product timelines', color: 'text-purple-700 bg-purple-50' },
+              { to: '/rules', icon: ShieldCheck, label: 'Compliance Rules', desc: 'Legal Metrology 2011 repository', color: 'text-emerald-700 bg-emerald-50' },
             ].map((action, i) => (
               <Link
                 key={i}
                 to={action.to}
-                className="flex items-center gap-3 p-3 rounded-lg border border-border hover:border-gray-300 hover:shadow-sm transition-all"
+                className="flex items-center gap-3 p-3 rounded-xl border border-slate-200 hover:border-teal-500 hover:shadow-sm transition-all"
               >
                 <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${action.color}`}>
                   <action.icon className="w-4 h-4" />
                 </div>
                 <div className="min-w-0">
-                  <div className="text-sm font-medium text-navy">{action.label}</div>
-                  <div className="text-xs text-gray-400">{action.desc}</div>
+                  <div className="text-xs font-bold text-slate-900">{action.label}</div>
+                  <div className="text-[11px] text-slate-500">{action.desc}</div>
                 </div>
-                <ArrowRight className="w-4 h-4 text-gray-300 ml-auto flex-shrink-0" />
+                <ArrowRight className="w-4 h-4 text-slate-300 ml-auto flex-shrink-0" />
               </Link>
             ))}
           </div>
         </div>
       </div>
 
-      {/* Recent Scans Table */}
-      <div className="card mt-6">
+      {/* Recent Inspections Table */}
+      <div className="card">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="section-title text-base">Recent Scans</h2>
-            <p className="section-subtitle">Latest product compliance checks</p>
+            <h2 className="section-title text-base">Recent Inspections</h2>
+            <p className="section-subtitle">Real database inspection records</p>
           </div>
-          <Link to="/history" className="btn btn-secondary btn-sm">
-            View All
+          <Link to="/history" className="btn btn-secondary btn-sm flex items-center gap-1">
+            View All History
             <ArrowRight className="w-3.5 h-3.5" />
           </Link>
         </div>
-        <div className="overflow-x-auto -mx-6 px-6">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>Product</th>
-                <th>Scan Date</th>
-                <th>MRP</th>
-                <th>Status</th>
-                <th>Issues</th>
-                <th>Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {DEMO_SCANS.map(scan => (
-                <tr key={scan.id}>
-                  <td>
-                    <div className="font-medium text-navy">{scan.productName}</div>
-                  </td>
-                  <td className="text-gray-500 text-xs">
-                    {format(new Date(scan.scanDate), 'dd MMM yyyy, HH:mm')}
-                  </td>
-                  <td className="font-medium">{scan.mrp}</td>
-                  <td>
-                    <StatusBadge status={scan.overallStatus} />
-                  </td>
-                  <td>
-                    {scan.failCount > 0 ? (
-                      <span className="text-error font-medium">{scan.failCount} failed</span>
-                    ) : scan.reviewCount > 0 ? (
-                      <span className="text-warning font-medium">{scan.reviewCount} to review</span>
-                    ) : (
-                      <span className="text-success font-medium">None</span>
-                    )}
-                  </td>
-                  <td>
-                    <Link
-                      to={`/result/${scan.id}`}
-                      className="text-xs text-primary hover:underline font-medium"
-                    >
-                      View Report →
-                    </Link>
-                  </td>
+
+        {metrics.isEmpty && !demoMode ? (
+          <div className="text-center py-10 border-2 border-dashed border-slate-200 rounded-xl">
+            <Camera className="w-10 h-10 text-slate-300 mx-auto mb-2" />
+            <h3 className="font-semibold text-slate-800 text-sm">No inspections yet</h3>
+            <p className="text-xs text-slate-500 mt-1 mb-3">Scan your first commodity label to record persistent inspection data.</p>
+            <Link to="/scan" className="btn btn-primary btn-sm">
+              Start Scan Now
+            </Link>
+          </div>
+        ) : (
+          <div className="overflow-x-auto -mx-6 px-6">
+            <table className="data-table text-xs">
+              <thead>
+                <tr>
+                  <th>Inspection ID</th>
+                  <th>Product Name</th>
+                  <th>Category</th>
+                  <th>Date</th>
+                  <th>Status</th>
+                  <th>Action</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {(demoMode ? DEMO_SCANS : metrics.recentInspections).map(scan => (
+                  <tr key={scan.scanId || scan.id}>
+                    <td className="font-mono text-teal-800 font-bold">{scan.scanId || scan.id}</td>
+                    <td className="font-bold text-slate-900">{scan.productName}</td>
+                    <td><span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded font-semibold text-[11px]">{scan.category}</span></td>
+                    <td className="text-slate-500">
+                      {scan.createdAt ? format(new Date(scan.createdAt), 'dd MMM yyyy, HH:mm') : scan.scanDate}
+                    </td>
+                    <td>
+                      <StatusBadge status={scan.assessmentStatus || scan.status || scan.overallStatus} size="sm" />
+                    </td>
+                    <td>
+                      <Link
+                        to={`/result/${scan.assessmentId || scan.scanId || scan.id}`}
+                        className="text-xs text-teal-700 hover:underline font-bold flex items-center gap-1"
+                      >
+                        <Eye className="w-3.5 h-3.5" /> View Assessment
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
 }
-

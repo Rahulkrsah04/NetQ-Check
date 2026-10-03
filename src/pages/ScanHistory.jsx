@@ -1,174 +1,248 @@
-import { useState, useMemo } from 'react';
+// ============================================================
+// NetQ Check — Inspection History Page
+// Real database query for scan history with multi-parameter search & filtering
+// ============================================================
+
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Search, Filter, Eye, Download } from 'lucide-react';
+import { Search, Filter, Eye, Download, History, PlusCircle, ArrowUpDown, Calendar, UserCheck } from 'lucide-react';
 import { StatusBadge } from '../components/ui/StatusBadge';
 import Button from '../components/ui/Button';
-import { DEMO_SCANS } from '../data/mockData';
+import { searchScans } from '../services/repositories/scanRepository';
+import { getAssessmentByScanId, getAssessmentById } from '../services/repositories/assessmentRepository';
+import { getProductById } from '../services/repositories/productRepository';
+import { PRODUCT_CATEGORIES } from '../services/ruleEngine/productCategories';
 import { generatePDFReport } from '../services/reportService';
-import { DEMO_EXTRACTED_DATA, DEMO_COMPLIANCE_RESULTS } from '../data/mockData';
+import { saveReport } from '../services/repositories/reportRepository';
+import { useAuth } from '../contexts/AuthContext';
 import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 
-const STATUS_FILTERS = [
-  { id: 'ALL', label: 'All Scans' },
-  { id: 'COMPLIANT', label: 'Compliant' },
-  { id: 'NON_COMPLIANT', label: 'Non-Compliant' },
-  { id: 'NEEDS_REVIEW', label: 'Needs Review' },
-];
-
 export default function ScanHistory() {
-  const [activeFilter, setActiveFilter] = useState('ALL');
+  const [activeStatus, setActiveStatus] = useState('ALL');
+  const [activeCategory, setActiveCategory] = useState('ALL');
   const [searchQuery, setSearchQuery] = useState('');
+  const [sortOrder, setSortOrder] = useState('NEWEST'); // NEWEST | OLDEST
   const [downloadingId, setDownloadingId] = useState(null);
 
-  const filteredScans = useMemo(() => {
-    return DEMO_SCANS.filter(scan => {
-      const matchesFilter = activeFilter === 'ALL' || scan.overallStatus === activeFilter;
-      const matchesSearch = !searchQuery ||
-        scan.productName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        scan.id.toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesFilter && matchesSearch;
-    });
-  }, [activeFilter, searchQuery]);
+  const { user } = useAuth();
+
+  const rawScans = searchScans({
+    search: searchQuery,
+    category: activeCategory,
+    status: activeStatus,
+  });
+
+  const sortedScans = [...rawScans].sort((a, b) => {
+    const timeA = new Date(a.createdAt).getTime();
+    const timeB = new Date(b.createdAt).getTime();
+    return sortOrder === 'NEWEST' ? timeB - timeA : timeA - timeB;
+  });
 
   const handleDownload = async (scan) => {
-    setDownloadingId(scan.id);
+    setDownloadingId(scan.scanId);
     try {
-      const extractedData = DEMO_EXTRACTED_DATA[scan.id];
-      const complianceResults = DEMO_COMPLIANCE_RESULTS[scan.id];
-      const summary = {
-        total: complianceResults?.length || 0,
-        pass: complianceResults?.filter(r => r.status === 'PASS').length || 0,
-        fail: scan.failCount,
-        review: scan.reviewCount,
+      const assessment = getAssessmentByScanId(scan.scanId) || getAssessmentById(scan.assessmentId);
+      const product = scan.productId ? getProductById(scan.productId) : null;
+      const extractedData = scan.normalizedData || {};
+      const complianceResults = assessment?.checks || [];
+      const summary = assessment?.summary || {
+        total: complianceResults.length,
+        pass: complianceResults.filter(r => r.status === 'PASS').length,
+        fail: complianceResults.filter(r => r.status === 'FAIL').length,
+        review: complianceResults.filter(r => r.status === 'NEEDS_REVIEW').length,
       };
-      await generatePDFReport({ scan, extractedData, complianceResults, summary, overallStatus: scan.overallStatus });
-      toast.success('Report downloaded');
-    } catch {
-      toast.error('Failed to download report');
+
+      const filename = await generatePDFReport({
+        scan,
+        extractedData,
+        complianceResults,
+        summary,
+        overallStatus: assessment?.overallStatus || scan.status,
+        audit: assessment,
+      });
+
+      saveReport({
+        assessmentId: assessment?.assessmentId || scan.assessmentId,
+        scanId: scan.scanId,
+        productId: product?.productId || scan.productId,
+        title: `Inspection Report - ${scan.scanId}`,
+      }, user);
+
+      toast.success(`Report saved & downloaded: ${filename}`);
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to generate report');
     } finally {
       setDownloadingId(null);
     }
   };
 
   return (
-    <div className="animate-fade-in">
+    <div className="animate-fade-in space-y-6">
+      {/* Header */}
       <div className="page-header">
         <div>
-          <h1 className="page-title">Scan History</h1>
-          <p className="page-desc">{DEMO_SCANS.length} total scans · {DEMO_SCANS.filter(s => s.overallStatus === 'COMPLIANT').length} compliant</p>
+          <h1 className="page-title">Inspection History</h1>
+          <p className="page-desc">{sortedScans.length} total inspections recorded in platform</p>
         </div>
-        <Link to="/scan" className="btn btn-primary">
-          New Scan
+        <Link to="/scan" className="btn btn-primary flex items-center gap-1.5 shadow-sm">
+          <PlusCircle className="w-4 h-4" />
+          New Inspection Scan
         </Link>
       </div>
 
-      {/* Filters & Search */}
-      <div className="card mb-5">
-        <div className="flex flex-col sm:flex-row gap-4">
-          {/* Status filters */}
-          <div className="flex gap-1.5 flex-wrap">
-            {STATUS_FILTERS.map(f => (
-              <button
-                key={f.id}
-                id={`filter-${f.id.toLowerCase()}`}
-                onClick={() => setActiveFilter(f.id)}
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                  activeFilter === f.id
-                    ? 'bg-primary text-white'
-                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                {f.label}
-                <span className={`ml-1.5 text-xs ${activeFilter === f.id ? 'text-white/70' : 'text-gray-400'}`}>
-                  {f.id === 'ALL' ? DEMO_SCANS.length :
-                   DEMO_SCANS.filter(s => s.overallStatus === f.id).length}
-                </span>
-              </button>
-            ))}
+      {/* Filter and Search Bar */}
+      <div className="card p-4 space-y-3">
+        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+          {/* Search Box */}
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              id="history-search"
+              type="text"
+              className="form-input pl-9 text-xs"
+              placeholder="Search by Inspection ID, Product Name, Brand, Inspector..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
           </div>
 
-          {/* Search */}
-          <div className="flex-1 max-w-xs ml-auto">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              <input
-                id="history-search"
-                type="text"
-                className="form-input pl-9 text-sm"
-                placeholder="Search product name or ID…"
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-              />
-            </div>
+          {/* Controls */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Category Filter */}
+            <select
+              value={activeCategory}
+              onChange={e => setActiveCategory(e.target.value)}
+              className="form-input text-xs font-medium text-slate-700 py-1.5"
+            >
+              <option value="ALL">All Categories</option>
+              {PRODUCT_CATEGORIES.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+
+            {/* Status Filter */}
+            <select
+              value={activeStatus}
+              onChange={e => setActiveStatus(e.target.value)}
+              className="form-input text-xs font-medium text-slate-700 py-1.5"
+            >
+              <option value="ALL">All Statuses</option>
+              <option value="COMPLIANT">Compliant</option>
+              <option value="NON_COMPLIANT">Non-Compliant</option>
+              <option value="NEEDS_REVIEW">Needs Review</option>
+            </select>
+
+            {/* Sort Toggle */}
+            <button
+              onClick={() => setSortOrder(prev => prev === 'NEWEST' ? 'OLDEST' : 'NEWEST')}
+              className="btn btn-secondary btn-sm flex items-center gap-1.5 text-xs font-semibold"
+            >
+              <ArrowUpDown className="w-3.5 h-3.5" />
+              {sortOrder === 'NEWEST' ? 'Newest First' : 'Oldest First'}
+            </button>
           </div>
         </div>
       </div>
 
-      {/* Table */}
+      {/* History Table */}
       <div className="card">
-        {filteredScans.length === 0 ? (
+        {sortedScans.length === 0 ? (
           <div className="text-center py-12">
-            <Search className="w-10 h-10 text-gray-200 mx-auto mb-3" />
-            <h3 className="font-semibold text-navy">No scans found</h3>
-            <p className="text-gray-500 text-sm mt-1">Try adjusting your search or filter</p>
+            <History className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+            <h3 className="font-semibold text-slate-800 text-base">No Inspection Records</h3>
+            <p className="text-slate-500 text-xs mt-1">No inspections matched your filter criteria or database is empty.</p>
           </div>
         ) : (
           <div className="overflow-x-auto -mx-6 px-6">
-            <table className="data-table">
+            <table className="data-table text-xs">
               <thead>
                 <tr>
+                  <th>Inspection ID</th>
                   <th>Product</th>
-                  <th>Scan Date</th>
-                  <th>MRP</th>
+                  <th>Category</th>
+                  <th>Inspector</th>
+                  <th>Date</th>
                   <th>Status</th>
-                  <th>Issues</th>
-                  <th>Actions</th>
+                  <th>Issues / Summary</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredScans.map(scan => (
-                  <tr key={scan.id}>
-                    <td>
-                      <div className="font-medium text-navy">{scan.productName}</div>
-                      <div className="text-xs text-gray-400">{scan.id}</div>
-                    </td>
-                    <td className="text-gray-500 text-sm">
-                      {format(new Date(scan.scanDate), 'dd MMM yyyy')}
-                      <div className="text-xs text-gray-400">{format(new Date(scan.scanDate), 'HH:mm')}</div>
-                    </td>
-                    <td className="font-medium">{scan.mrp}</td>
-                    <td><StatusBadge status={scan.overallStatus} /></td>
-                    <td>
-                      <div className="text-xs space-y-0.5">
-                        {scan.failCount > 0 && <div className="text-error font-medium">{scan.failCount} failed</div>}
-                        {scan.reviewCount > 0 && <div className="text-warning font-medium">{scan.reviewCount} to review</div>}
-                        {scan.failCount === 0 && scan.reviewCount === 0 && <div className="text-success font-medium">None</div>}
-                      </div>
-                    </td>
-                    <td>
-                      <div className="flex items-center gap-2">
-                        <Link
-                          to={`/result/${scan.id}`}
-                          className="btn btn-secondary btn-sm"
-                          id={`view-${scan.id}`}
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          View
-                        </Link>
-                        <button
-                          onClick={() => handleDownload(scan)}
-                          disabled={downloadingId === scan.id}
-                          className="btn btn-secondary btn-sm"
-                          id={`download-${scan.id}`}
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          {downloadingId === scan.id ? '…' : 'PDF'}
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                {sortedScans.map(scan => {
+                  const assessment = getAssessmentByScanId(scan.scanId) || getAssessmentById(scan.assessmentId);
+                  const prod = scan.productId ? getProductById(scan.productId) : null;
+                  const productName = prod?.productName || scan.normalizedData?.productName || scan.rawOCRData?.productName || 'Prepacked Commodity';
+                  const status = assessment?.overallStatus || scan.status;
+
+                  return (
+                    <tr key={scan.scanId} className="hover:bg-slate-50/70">
+                      <td className="font-mono text-teal-800 font-bold">{scan.scanId}</td>
+                      <td>
+                        <div className="font-bold text-slate-900 line-clamp-1">{productName}</div>
+                        {prod && (
+                          <Link to={`/products/${prod.productId}`} className="text-[10px] text-teal-600 hover:underline">
+                            View Timeline
+                          </Link>
+                        )}
+                      </td>
+                      <td>
+                        <span className="text-[11px] font-semibold text-slate-700 bg-slate-100 px-2 py-0.5 rounded">
+                          {scan.category}
+                        </span>
+                      </td>
+                      <td className="text-slate-700 font-medium">
+                        {scan.userName || 'Raj Kumar'}
+                      </td>
+                      <td className="text-slate-600">
+                        {format(new Date(scan.createdAt), 'dd MMM yyyy')}
+                        <div className="text-[10px] text-slate-400">{format(new Date(scan.createdAt), 'HH:mm')}</div>
+                      </td>
+                      <td>
+                        <StatusBadge status={status} size="sm" />
+                      </td>
+                      <td>
+                        {assessment?.summary ? (
+                          <div className="text-[11px] space-y-0.5">
+                            {assessment.summary.failedCount > 0 && (
+                              <div className="text-red-600 font-semibold">{assessment.summary.failedCount} Failed Check(s)</div>
+                            )}
+                            {assessment.summary.reviewCount > 0 && (
+                              <div className="text-amber-600 font-semibold">{assessment.summary.reviewCount} Need Review</div>
+                            )}
+                            {assessment.summary.failedCount === 0 && assessment.summary.reviewCount === 0 && (
+                              <div className="text-teal-700 font-semibold">100% Passed</div>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td>
+                        <div className="flex items-center gap-2">
+                          <Link
+                            to={`/result/${assessment?.assessmentId || scan.scanId}`}
+                            className="btn btn-secondary btn-sm text-xs font-semibold text-teal-700 hover:bg-teal-50"
+                            id={`view-${scan.scanId}`}
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            View
+                          </Link>
+                          <button
+                            onClick={() => handleDownload(scan)}
+                            disabled={downloadingId === scan.scanId}
+                            className="btn btn-secondary btn-sm text-xs font-semibold"
+                            id={`download-${scan.scanId}`}
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            {downloadingId === scan.scanId ? '…' : 'PDF'}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

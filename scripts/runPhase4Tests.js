@@ -1,0 +1,35 @@
+// Node.js runner for Phase 4 Unit Tests
+
+// Mock localStorage for Node environment if missing
+if (typeof localStorage === 'undefined' || localStorage === null) {
+  const store = {};
+  global.localStorage = {
+    getItem: (key) => store[key] || null,
+    setItem: (key, value) => { store[key] = value.toString(); },
+    removeItem: (key) => { delete store[key]; },
+    clear: () => { Object.keys(store).forEach(k => delete store[k]); },
+  };
+}
+
+if (typeof sessionStorage === 'undefined' || sessionStorage === null) {
+  const store = {};
+  global.sessionStorage = {
+    getItem: (key) => store[key] || null,
+    setItem: (key, value) => { store[key] = value.toString(); },
+    removeItem: (key) => { delete store[key]; },
+    clear: () => { Object.keys(store).forEach(k => delete store[k]); },
+  };
+}
+
+import { runPhase4TestSuite } from '../src/services/__tests__/phase4.test.js';
+
+runPhase4TestSuite().then(({ passed, failed }) => {
+  if (failed > 0) {
+    process.exit(1);
+  } else {
+    process.exit(0);
+  }
+}).catch(err => {
+  console.error('Test execution error:', err);
+  process.exit(1);
+});

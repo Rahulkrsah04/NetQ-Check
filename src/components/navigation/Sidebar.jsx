@@ -1,23 +1,13 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Camera, History, FileText, ShieldCheck,
-  Package, Settings, LogOut, X
+  Package, Settings, LogOut, X, ScrollText, UserCheck
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import Logo from '../ui/Logo';
 
-const NAV_ITEMS = [
-  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/scan', label: 'Scan Product', icon: Camera },
-  { to: '/history', label: 'Scan History', icon: History },
-  { to: '/reports', label: 'Reports', icon: FileText },
-  { to: '/rules', label: 'Compliance Rules', icon: ShieldCheck },
-  { to: '/products', label: 'Products', icon: Package },
-  { to: '/settings', label: 'Settings', icon: Settings },
-];
-
 export default function Sidebar({ mobileOpen = false, onClose = () => {} }) {
-  const { user, logout } = useAuth();
+  const { user, logout, switchRole, checkRole, ROLES } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -25,6 +15,19 @@ export default function Sidebar({ mobileOpen = false, onClose = () => {} }) {
     onClose();
     navigate('/');
   };
+
+  const navItems = [
+    { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { to: '/scan', label: 'Scan Product', icon: Camera },
+    { to: '/history', label: 'Inspection History', icon: History },
+    { to: '/products', label: 'Products', icon: Package },
+    { to: '/reports', label: 'Reports', icon: FileText },
+    { to: '/rules', label: 'Compliance Rules', icon: ShieldCheck },
+    ...(checkRole([ROLES.ADMIN, ROLES.SUPERVISOR])
+      ? [{ to: '/audit', label: 'Audit Logs', icon: ScrollText }]
+      : []),
+    { to: '/settings', label: 'Settings', icon: Settings },
+  ];
 
   return (
     <>
@@ -54,9 +57,29 @@ export default function Sidebar({ mobileOpen = false, onClose = () => {} }) {
           </button>
         </div>
 
+        {/* Role Badge Banner */}
+        {user && (
+          <div className="px-4 py-2 bg-white/5 border-b border-white/10 flex items-center justify-between">
+            <span className="text-[11px] font-semibold text-white/70 flex items-center gap-1.5">
+              <UserCheck className="w-3.5 h-3.5 text-teal-400" />
+              Role: <span className="text-teal-300 font-bold">{user.role}</span>
+            </span>
+            <select
+              value={user.role}
+              onChange={(e) => switchRole(e.target.value)}
+              className="bg-navy border border-white/20 text-white/80 text-[10px] rounded px-1.5 py-0.5 focus:outline-none focus:border-teal-400"
+              title="Switch role for testing"
+            >
+              <option value={ROLES.INSPECTOR}>INSPECTOR</option>
+              <option value={ROLES.SUPERVISOR}>SUPERVISOR</option>
+              <option value={ROLES.ADMIN}>ADMIN</option>
+            </select>
+          </div>
+        )}
+
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-          {NAV_ITEMS.map(item => (
+          {navItems.map(item => (
             <NavLink
               key={item.to}
               to={item.to}
@@ -78,7 +101,7 @@ export default function Sidebar({ mobileOpen = false, onClose = () => {} }) {
 
         {/* User Profile Footer */}
         <div className="px-3 pb-4 flex-shrink-0 border-t border-white/10 pt-3">
-          <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-white/10 cursor-pointer transition-colors">
+          <div className="flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-white/10 transition-colors">
             <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
               <span className="text-primary font-bold text-xs">
                 {user?.displayName?.charAt(0) || 'U'}
@@ -102,4 +125,3 @@ export default function Sidebar({ mobileOpen = false, onClose = () => {} }) {
     </>
   );
 }
-

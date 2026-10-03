@@ -2,6 +2,7 @@ import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider } from './contexts/AuthContext';
 import { PublicLayout, DashboardLayout } from './layouts/AppLayouts';
+import ProtectedRoute from './components/auth/ProtectedRoute';
 
 // Public Pages
 import LandingPage from './pages/LandingPage';
@@ -16,6 +17,8 @@ import ScanHistory from './pages/ScanHistory';
 import Reports from './pages/Reports';
 import ComplianceRulesPage from './pages/ComplianceRulesPage';
 import ProductsPage from './pages/ProductsPage';
+import ProductDetails from './pages/ProductDetails';
+import AuditLogPage from './pages/AuditLogPage';
 import Settings from './pages/Settings';
 
 export default function App() {
@@ -31,7 +34,7 @@ export default function App() {
             <Route path="/about" element={<LandingPage />} />
           </Route>
 
-          {/* Auth Routes (no layout) */}
+          {/* Auth Routes */}
           <Route path="/login" element={<LoginPage />} />
 
           {/* Protected Dashboard Routes */}
@@ -43,6 +46,15 @@ export default function App() {
             <Route path="/reports" element={<Reports />} />
             <Route path="/rules" element={<ComplianceRulesPage />} />
             <Route path="/products" element={<ProductsPage />} />
+            <Route path="/products/:id" element={<ProductDetails />} />
+            <Route
+              path="/audit"
+              element={
+                <ProtectedRoute allowedRoles={['ADMIN', 'SUPERVISOR']}>
+                  <AuditLogPage />
+                </ProtectedRoute>
+              }
+            />
             <Route path="/settings" element={<Settings />} />
           </Route>
 
@@ -55,14 +67,14 @@ export default function App() {
           toastOptions={{
             duration: 3500,
             style: {
-              background: '#172033',
+              background: '#0F172A',
               color: '#fff',
               borderRadius: '10px',
               fontSize: '13px',
               fontFamily: 'Inter, sans-serif',
             },
             success: {
-              iconTheme: { primary: '#16A34A', secondary: '#fff' },
+              iconTheme: { primary: '#0F766E', secondary: '#fff' },
             },
             error: {
               iconTheme: { primary: '#DC2626', secondary: '#fff' },
