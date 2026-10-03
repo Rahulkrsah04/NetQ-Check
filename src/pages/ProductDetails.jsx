@@ -1,19 +1,23 @@
 // ============================================================
 // NetQ Check — Product Details & Inspection Timeline Page
-// Displays master product details and complete scan history timeline
+// Master product details, inspection timeline & inspection comparison modal
 // ============================================================
 
-import React from 'react';
+import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { getProductById } from '../services/repositories/productRepository';
 import { getScansByProductId } from '../services/repositories/scanRepository';
 import { getAssessmentByScanId } from '../services/repositories/assessmentRepository';
 import { StatusBadge } from '../components/ui/StatusBadge';
-import { ArrowLeft, Package, Calendar, Layers, Factory, History, FileText, ChevronRight, AlertCircle, PlusCircle } from 'lucide-react';
+import ScanComparisonModal from '../components/comparison/ScanComparisonModal';
+import { ArrowLeft, Package, Calendar, Layers, Factory, History, FileText, ChevronRight, AlertCircle, PlusCircle, ArrowRightLeft } from 'lucide-react';
 import { format } from 'date-fns';
+import toast from 'react-hot-toast';
 
 export default function ProductDetails() {
   const { id } = useParams();
+  const [isCompareOpen, setIsCompareOpen] = useState(false);
+
   const product = getProductById(id);
   const scans = getScansByProductId(id);
 
@@ -32,6 +36,17 @@ export default function ProductDetails() {
     );
   }
 
+  const currentScan = scans[0] || null;
+  const previousScan = scans.length > 1 ? scans[1] : scans[0];
+
+  const handleOpenCompare = () => {
+    if (scans.length < 1) {
+      toast.error('Insufficient scans to compare');
+      return;
+    }
+    setIsCompareOpen(true);
+  };
+
   return (
     <div className="max-w-4xl space-y-6 animate-fade-in">
       {/* Top Header */}
@@ -46,10 +61,23 @@ export default function ProductDetails() {
             <p className="page-desc">Product Master ID: <span className="font-mono font-semibold text-slate-700">{product.productId}</span></p>
           </div>
         </div>
-        <Link to="/scan" className="btn btn-primary btn-sm flex items-center gap-1.5">
-          <PlusCircle className="w-4 h-4" />
-          New Inspection Scan
-        </Link>
+
+        <div className="flex items-center gap-2">
+          {scans.length >= 1 && (
+            <button
+              onClick={handleOpenCompare}
+              className="btn btn-secondary btn-sm flex items-center gap-1.5 font-semibold text-teal-800 border-teal-200 hover:bg-teal-50"
+            >
+              <ArrowRightLeft className="w-4 h-4 text-teal-700" />
+              Compare Inspections ({scans.length})
+            </button>
+          )}
+
+          <Link to="/scan" className="btn btn-primary btn-sm flex items-center gap-1.5">
+            <PlusCircle className="w-4 h-4" />
+            New Inspection Scan
+          </Link>
+        </div>
       </div>
 
       {/* Product Overview Card */}
@@ -155,12 +183,6 @@ export default function ProductDetails() {
                         <span>Date: <strong>{format(new Date(scan.createdAt), 'dd MMM yyyy, HH:mm')}</strong></span>
                         <span>Ruleset: <code className="text-teal-700 bg-teal-50 px-1 rounded">{scan.ruleSetVersion || 'PC_RULES_2011_V1'}</code></span>
                       </div>
-
-                      {assessment?.summary && (
-                        <div className="text-[11px] text-slate-500 pt-1">
-                          Checks: Passed {assessment.summary.passedCount || 0} / Failed {assessment.summary.failedCount || 0} / Review {assessment.summary.reviewCount || 0}
-                        </div>
-                      )}
                     </div>
 
                     <Link
@@ -178,6 +200,14 @@ export default function ProductDetails() {
           </div>
         )}
       </div>
+
+      {/* SCAN COMPARISON MODAL */}
+      <ScanComparisonModal
+        isOpen={isCompareOpen}
+        onClose={() => setIsCompareOpen(false)}
+        currentScan={currentScan}
+        previousScan={previousScan}
+      />
     </div>
   );
 }
