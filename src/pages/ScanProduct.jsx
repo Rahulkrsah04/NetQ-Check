@@ -25,7 +25,7 @@ const PROCESS_STEPS = [
   'Image Quality Analysis',
   'Image Preprocessing',
   'OCR Extraction',
-  'Declaration Mapping',
+  'Declaration Detection',
   'Barcode / QR Detection',
   'Data Fusion',
   'Compliance Assessment',
@@ -70,7 +70,7 @@ export default function ScanProduct() {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const handleAddImage = useCallback(async (file, imageType = nextImageType) => {
+  const handleAddImage = useCallback(async (file, imageType = nextImageType, isDemoPreset = false) => {
     const preview = URL.createObjectURL(file);
     const quality = await analyzeImageQuality(file);
 
@@ -86,6 +86,7 @@ export default function ScanProduct() {
       qualityScore: quality.score,
       qualityStatus: quality.quality,
       createdAt: new Date().toISOString(),
+      isDemoPreset: isDemoPreset,
     };
 
     setLabelImages(prev => [...prev, imageObj]);
@@ -102,11 +103,11 @@ export default function ScanProduct() {
     }
     setLabelImages([]);
     setQualityWarnings([]);
-    handleAddImage(dummyFile, 'Front Label');
+    handleAddImage(dummyFile, 'Front Label', true);
     if (sample.id === 'sample-conflict') {
       // Add secondary back label for conflict simulation
       const backFile = new File(['sample back content'], 'conflict_back_label.png', { type: 'image/png' });
-      handleAddImage(backFile, 'Back Label');
+      handleAddImage(backFile, 'Back Label', true);
     }
     toast.success(`Loaded sample: ${sample.label}`);
   };
@@ -144,12 +145,12 @@ export default function ScanProduct() {
     // Run 8-step visual analysis pipeline
     for (let i = 0; i < PROCESS_STEPS.length; i++) {
       setAnalysisProgress({ stepIndex: i, stepName: PROCESS_STEPS[i] });
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 200));
     }
 
     // Process each image through OCR, Barcode & Quality
     for (const img of labelImages) {
-      const res = await startScan(img.file);
+      const res = await startScan(img.file, img.isDemoPreset || false);
 
       // Preprocessing
       await preprocessImage(img.file);
@@ -160,8 +161,8 @@ export default function ScanProduct() {
 
       let extracted = res?.extractedData || {};
 
-      // Handle Scenario 4 Conflict simulation if sample-conflict
-      if (img.fileName?.includes('conflict_back')) {
+      // Handle Scenario 4 Conflict simulation if sample-conflict preset
+      if (img.fileName?.includes('conflict_back') && img.isDemoPreset) {
         extracted = {
           ...extracted,
           mrp: { value: '₹125', confidence: 0.95 },
@@ -184,15 +185,17 @@ export default function ScanProduct() {
       toast.error('CONFLICT DETECTED: Conflicting MRP values found across Front & Back labels!', { duration: 5000 });
     }
 
-    // Match existing products
-    const primaryName = fused.unifiedData?.productName?.value || labelImages[0]?.fileName;
-    const matches = findMatchingProducts({
-      productName: primaryName,
-      categoryId: selectedCategory,
-    });
-    setMatchedProducts(matches);
-    if (matches.length > 0) {
-      setSelectedProductId(matches[0].product.productId);
+    // Match existing products if productName extracted
+    const primaryName = fused.unifiedData?.productName?.value;
+    if (primaryName) {
+      const matches = findMatchingProducts({
+        productName: primaryName,
+        categoryId: selectedCategory,
+      });
+      setMatchedProducts(matches);
+      if (matches.length > 0) {
+        setSelectedProductId(matches[0].product.productId);
+      }
     }
   };
 
@@ -218,7 +221,6 @@ export default function ScanProduct() {
       finalData[key] = editedData[key] ?? fused[key] ?? { value: null, confidence: 0 };
     });
 
-    // If conflict existed in fusion, force REVIEW status
     const result = runCompliance(finalData, selectedCategory);
 
     if (fusionResult?.hasConflicts) {
@@ -261,7 +263,7 @@ export default function ScanProduct() {
     const scanRecord = createScan({
       productId: activeProduct.productId,
       images: labelImages.map(img => img.preview),
-      rawOCRData: { text: 'Multi-Image Fusion OCR' },
+      rawOCRData: { text: ocrResult?.rawText || 'Multi-Image Fusion OCR' },
       normalizedData: mappedWithEvidence,
       category: selectedCategory,
       status: result.overallStatus,
@@ -335,7 +337,7 @@ export default function ScanProduct() {
               <PlayCircle className="w-3.5 h-3.5 text-primary" />
               Quick Test Demo Scenarios (Phase 5 Visual Evidence):
             </span>
-            <span className="text-[11px] text-gray-500">Click any preset to test the workflow</span>
+            <span className="text-[11px] text-gray-500">Click any preset to test demo scenarios</span>
           </div>
           <div className="flex flex-wrap gap-2">
             {DEMO_SAMPLES.map(sample => (
@@ -377,11 +379,11 @@ export default function ScanProduct() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {activeTab === 'upload' ? (
               <UploadBox
-                onFileSelect={(file) => handleAddImage(file, nextImageType)}
+                onFileSelect={(file) => handleAddImage(file, nextImageType, false)}
                 error={error}
               />
             ) : (
-              <CaptureBox onFileSelect={(file) => handleAddImage(file, nextImageType)} />
+              <CaptureBox onFileSelect={(file) => handleAddImage(file, nextImageType, false)} />
             )}
 
             {/* Uploaded Gallery */}
@@ -473,7 +475,7 @@ export default function ScanProduct() {
                     Existing product detected in master catalog
                   </h3>
                   <div className="mt-2 space-y-2">
-                    {matchedProducts.map(({ product, confidence }) => (
+                    {matchedProducts.map(({ product }) => (
                       <div key={product.productId} className="p-3 bg-white rounded-lg border text-xs flex justify-between items-center">
                         <div>
                           <div className="font-bold">{product.productName}</div>
@@ -512,6 +514,7 @@ export default function ScanProduct() {
                 const displayVal = editedVal?.value ?? fieldVal?.value ?? '';
                 const conf = editedVal?.confidence ?? fieldVal?.confidence ?? 0;
                 const isConflict = fieldVal?.conflictDetected || false;
+                const remarks = fieldVal?.remarks || (displayVal ? 'Extracted from label' : 'NOT_DETECTED — Manual Verification Required');
 
                 return (
                   <div key={key} className={`py-3 grid grid-cols-1 sm:grid-cols-5 gap-2 sm:gap-4 items-center ${isConflict ? 'bg-red-50/50 p-2 rounded' : ''}`}>
@@ -521,11 +524,16 @@ export default function ScanProduct() {
                     <div className="sm:col-span-2">
                       <input
                         type="text"
-                        className={`form-input text-sm ${isConflict ? 'border-red-400 bg-red-50 text-red-900 font-bold' : ''}`}
+                        className={`form-input text-sm ${isConflict ? 'border-red-400 bg-red-50 text-red-900 font-bold' : ''} ${!displayVal ? 'border-amber-300 bg-amber-50/50 text-amber-900' : ''}`}
                         value={displayVal}
-                        placeholder={`Enter ${label.toLowerCase()}`}
+                        placeholder={remarks}
                         onChange={e => handleFieldEdit(key, e.target.value)}
                       />
+                      {!displayVal && (
+                        <div className="text-[10px] text-amber-700 font-medium mt-0.5">
+                          {remarks}
+                        </div>
+                      )}
                       {isConflict && (
                         <div className="text-[10px] text-red-600 font-semibold mt-0.5">
                           Conflict Detected ({fieldVal.conflictingValues?.join(' vs ')})
@@ -536,7 +544,7 @@ export default function ScanProduct() {
                       {conf > 0 ? (
                         <ConfidenceBar confidence={conf} />
                       ) : (
-                        <span className="text-xs text-gray-400 italic">Not detected</span>
+                        <span className="text-xs text-amber-700 font-semibold">NOT_DETECTED (0%)</span>
                       )}
                     </div>
                     <div className="sm:col-span-1">
@@ -546,10 +554,12 @@ export default function ScanProduct() {
                         </span>
                       ) : conf > 0 ? (
                         <span className="text-xs text-success flex items-center gap-1">
-                          <CheckCircle className="w-3 h-3" /> Verified
+                          <CheckCircle className="w-3 h-3" /> Verified ({Math.round(conf * 100)}%)
                         </span>
                       ) : (
-                        <span className="text-xs text-gray-400">—</span>
+                        <span className="text-xs text-amber-700 font-bold flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" /> Not Detected
+                        </span>
                       )}
                     </div>
                   </div>

@@ -14,7 +14,7 @@ export function useOCR() {
   const [error, setError] = useState(null);
   const [stage, setStage] = useState('idle'); // idle | processing | review | compliance | done
 
-  const startScan = async (imageFile) => {
+  const startScan = async (imageFile, isDemoPreset = false) => {
     setProcessing(true);
     setError(null);
     setOcrResult(null);
@@ -24,7 +24,7 @@ export function useOCR() {
     try {
       const result = await processImage(imageFile, (prog) => {
         setProgress(prog);
-      });
+      }, isDemoPreset);
 
       if (!result.success) {
         throw new Error(result.error || 'Failed to extract text from image');
@@ -32,6 +32,7 @@ export function useOCR() {
 
       setOcrResult(result);
       setStage('review');
+      return result;
     } catch (err) {
       setError(
         err.message?.includes('Failed to extract')
@@ -39,6 +40,7 @@ export function useOCR() {
           : err.message || 'An unexpected error occurred during image processing.'
       );
       setStage('idle');
+      return null;
     } finally {
       setProcessing(false);
     }
