@@ -10,13 +10,22 @@
 export function normalizeMRP(rawValue) {
   if (!rawValue) return null;
   const str = String(rawValue).trim();
-  const digitsMatch = str.match(/\d+(?:\.\d{1,2})?/);
-  const amount = digitsMatch ? parseFloat(digitsMatch[0]) : null;
+  if (/not_detected|manual verification required|not visible/i.test(str)) {
+    return { rawValue: str, normalizedValue: null, amount: null, currency: 'INR', hasTaxClause: false, hasCurrencySymbol: false };
+  }
+
+  const digitsMatch = str.match(/\b\d+(?:\.\d{1,2})?\b/);
+  let amount = digitsMatch ? parseFloat(digitsMatch[0]) : null;
+
+  // Safeguard: reject numbers longer than 6 digits (phone, barcode, pin code)
+  if (digitsMatch && digitsMatch[0].replace('.', '').length > 6) {
+    amount = null;
+  }
 
   const hasTaxClause = /inclusive of all taxes|incl\.? of all taxes|incl\.? taxes/i.test(str);
   const hasCurrencySymbol = /₹|rs\.?|inr/i.test(str);
 
-  if (amount === null) return { rawValue: str, normalizedValue: str, amount: null, currency: 'INR', hasTaxClause };
+  if (amount === null) return { rawValue: str, normalizedValue: str, amount: null, currency: 'INR', hasTaxClause, hasCurrencySymbol };
 
   return {
     rawValue: str,
@@ -34,7 +43,11 @@ export function normalizeMRP(rawValue) {
 export function normalizeQuantity(rawValue) {
   if (!rawValue) return null;
   const str = String(rawValue).trim();
-  const match = str.match(/(\d+(?:\.\d+)?)\s*(kg|g|gm|gram|grams|ml|l|ltr|litre|liter|mg|pcs|pieces|nos|units)/i);
+  if (/not_detected|manual verification required|not visible/i.test(str)) {
+    return { rawValue: str, normalizedValue: null, numericValue: null, unit: null, standardSI: null };
+  }
+
+  const match = str.match(/(\d+(?:\.\d+)?)\s*(kg|g|gm|gram|grams|ml|l|ltr|litre|liter|mg|pcs|pieces|nos|units)\b/i);
 
   if (!match) return { rawValue: str, normalizedValue: str, numericValue: null, unit: null, standardSI: null };
 

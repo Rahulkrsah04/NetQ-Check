@@ -1,16 +1,55 @@
 // ============================================================
 // NetQ Check — Multi-Image Data Fusion & Conflict Detection Engine
-// Combines extracted declarations across multiple label images and flags conflicts
+// Combines extracted declarations across multiple label images,
+// normalizes equivalent values before comparison, and flags genuine conflicts
 // ============================================================
 
 import { attachVisualEvidence } from '../evidence/evidenceMapperService.js';
 
 /**
- * Clean & normalize numeric currency or quantity for comparison
+ * Standardizes values for equivalence comparison across multiple images
+ * Converts equivalent prices (e.g. "₹120", "120.00", "120 INR")
+ * and equivalent quantities (e.g. "1 kg", "1000 g", "1.0 kg") into identical tokens
+ * so that false positive conflicts are NOT triggered.
  */
-function normalizeForComparison(val) {
-  if (!val) return '';
-  return String(val).toLowerCase().replace(/[^a-z0-9.]/g, '').trim();
+export function normalizeForEquivalence(val) {
+  if (val === null || val === undefined) return '';
+  const str = String(val).trim().toLowerCase();
+
+  // 1. Currency normalization (e.g. "₹120", "rs. 120", "120.00 inr" -> "120")
+  const priceMatch = str.match(/(?:rs\.?|₹|inr)?\s*([\d,]+(?:\.\d+)?)/i);
+  if (priceMatch && /(?:rs\.?|₹|inr)/i.test(str)) {
+    const num = parseFloat(priceMatch[1].replace(/,/g, ''));
+    if (!isNaN(num)) {
+      return `CURRENCY_${num.toFixed(2)}`;
+    }
+  }
+
+  // 2. Quantity normalization to base units (e.g. "1 kg" & "1000 g" -> "QTY_1000_G")
+  const qtyMatch = str.match(/([\d.]+)\s*(kg|g|gm|gram|grams|ml|l|ltr|litre|liter|mg|pcs|pieces)\b/i);
+  if (qtyMatch) {
+    const amount = parseFloat(qtyMatch[1]);
+    const unit = qtyMatch[2].toLowerCase();
+
+    if (['kg'].includes(unit)) {
+      return `QTY_${(amount * 1000).toFixed(1)}_G`;
+    }
+    if (['g', 'gm', 'gram', 'grams'].includes(unit)) {
+      return `QTY_${amount.toFixed(1)}_G`;
+    }
+    if (['l', 'ltr', 'litre', 'liter'].includes(unit)) {
+      return `QTY_${(amount * 1000).toFixed(1)}_ML`;
+    }
+    if (['ml'].includes(unit)) {
+      return `QTY_${amount.toFixed(1)}_ML`;
+    }
+    if (['pcs', 'pieces'].includes(unit)) {
+      return `QTY_${amount}_PCS`;
+    }
+  }
+
+  // 3. Fallback string normalization: alphanumeric only, collapsed whitespace
+  return str.replace(/[^a-z0-9]/g, '');
 }
 
 /**
@@ -38,8 +77,9 @@ export function fuseMultiImageScan(labelScanResults = []) {
     const fields = scan.extractedData || {};
 
     Object.entries(fields).forEach(([key, fieldVal]) => {
+      if (key === 'rawOCRText') return;
       const valText = typeof fieldVal === 'object' ? fieldVal?.value : fieldVal;
-      if (!valText) return;
+      if (!valText) return; // Do not treat missing/not-detected fields as conflicts
 
       if (!fieldSources[key]) {
         fieldSources[key] = [];
@@ -50,6 +90,7 @@ export function fuseMultiImageScan(labelScanResults = []) {
         imageLabel,
         value: valText,
         confidence: fieldVal?.confidence || 0.90,
+        originalValue: fieldVal?.originalValue || valText,
         rawField: fieldVal,
       });
     });
@@ -59,16 +100,16 @@ export function fuseMultiImageScan(labelScanResults = []) {
   Object.entries(fieldSources).forEach(([key, occurrences]) => {
     if (occurrences.length === 0) return;
 
-    // Check if distinct values exist across images
-    const uniqueNormalized = new Set(occurrences.map(o => normalizeForComparison(o.value)));
+    // Check if distinct NON-EQUIVALENT values exist across images
+    const uniqueTokens = new Set(occurrences.map(o => normalizeForEquivalence(o.value)));
 
-    if (uniqueNormalized.size > 1) {
-      // CONFLICT DETECTED!
+    if (uniqueTokens.size > 1) {
+      // GENUINE CONFLICT DETECTED across images!
       const conflictItem = {
         field: key,
         fieldLabel: key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase()),
         occurrences,
-        warning: 'CONFLICT DETECTED: Different values extracted across label images.',
+        warning: 'CONFLICT DETECTED: Different non-equivalent values extracted across label images.',
         actionRequired: 'Manual Verification Required',
       };
 
@@ -76,22 +117,29 @@ export function fuseMultiImageScan(labelScanResults = []) {
 
       unifiedData[key] = {
         value: occurrences[0].value,
+        originalValue: occurrences[0].originalValue,
         confidence: 0.50, // Reduced confidence due to conflict
         conflictDetected: true,
         conflictingValues: occurrences.map(o => `${o.imageLabel}: ${o.value}`),
         sources: occurrences,
         status: 'NEEDS_REVIEW',
+        manualVerificationRequired: true,
         remarks: `Conflict detected across images (${occurrences.map(o => `${o.imageLabel}: ${o.value}`).join(' vs ')}). Manual verification required.`,
       };
     } else {
-      // Unified consensus value
-      const primary = occurrences[0];
+      // Unified consensus value (highest confidence)
+      const sortedByConf = [...occurrences].sort((a, b) => b.confidence - a.confidence);
+      const primary = sortedByConf[0];
+
       unifiedData[key] = {
         ...primary.rawField,
         value: primary.value,
-        confidence: Math.max(...occurrences.map(o => o.confidence)),
+        originalValue: primary.originalValue,
+        confidence: primary.confidence,
         conflictDetected: false,
         sources: occurrences,
+        sourceImageId: primary.imageId,
+        sourceImageType: primary.imageLabel,
       };
     }
   });

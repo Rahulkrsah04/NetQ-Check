@@ -43,7 +43,12 @@ class RealImageOCRService {
       }
 
       // If text extracted via OCR, parse declarations using Real Image OCR Parser
-      const extractedData = parseRealImageDeclarations(rawText);
+      const imageMeta = {
+        imageId: imageFile?.imageId || 'IMG-01',
+        imageType: imageFile?.imageType || 'Front Label',
+        fileName: imageFile?.name || imageFile?.fileName || 'label_image',
+      };
+      const extractedData = parseRealImageDeclarations(rawText, imageMeta);
 
       return {
         success: true,
@@ -58,7 +63,10 @@ class RealImageOCRService {
       return {
         success: true,
         rawText: '',
-        extractedData: parseRealImageDeclarations(''),
+        extractedData: parseRealImageDeclarations('', {
+          imageId: imageFile?.imageId || 'IMG-01',
+          imageType: imageFile?.imageType || 'Front Label',
+        }),
         provider: 'real_ocr',
         isDemoData: false,
         error: err.message,

@@ -515,11 +515,18 @@ export default function ScanProduct() {
                 const conf = editedVal?.confidence ?? fieldVal?.confidence ?? 0;
                 const isConflict = fieldVal?.conflictDetected || false;
                 const remarks = fieldVal?.remarks || (displayVal ? 'Extracted from label' : 'NOT_DETECTED — Manual Verification Required');
+                const sourceBadge = fieldVal?.sourceImageType || fieldVal?.imageType || null;
+                const onlinePrice = fieldVal?.onlineSellingPrice || null;
 
                 return (
                   <div key={key} className={`py-3 grid grid-cols-1 sm:grid-cols-5 gap-2 sm:gap-4 items-center ${isConflict ? 'bg-red-50/50 p-2 rounded' : ''}`}>
                     <div className="sm:col-span-1">
                       <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</span>
+                      {sourceBadge && (
+                        <div className="text-[10px] text-teal-700 font-medium">
+                          Source: {sourceBadge}
+                        </div>
+                      )}
                     </div>
                     <div className="sm:col-span-2">
                       <input
@@ -532,6 +539,11 @@ export default function ScanProduct() {
                       {!displayVal && (
                         <div className="text-[10px] text-amber-700 font-medium mt-0.5">
                           {remarks}
+                        </div>
+                      )}
+                      {displayVal && onlinePrice && (
+                        <div className="text-[10px] text-blue-700 font-medium mt-0.5">
+                          Package MRP: {displayVal} · Online App Price: {onlinePrice}
                         </div>
                       )}
                       {isConflict && (
@@ -566,6 +578,19 @@ export default function ScanProduct() {
                 );
               })}
             </div>
+
+            {/* Collapsible Raw OCR Transcript for Audit & Verification */}
+            {ocrResult?.rawText && (
+              <details className="mt-4 pt-3 border-t border-border group">
+                <summary className="text-xs font-semibold text-slate-600 cursor-pointer hover:text-teal-700 select-none flex items-center gap-1.5">
+                  <Info className="w-3.5 h-3.5 text-teal-600" />
+                  View Raw OCR Transcript (Auditing & Verification)
+                </summary>
+                <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-800 whitespace-pre-wrap max-h-48 overflow-y-auto">
+                  {ocrResult.rawText}
+                </div>
+              </details>
+            )}
 
             <div className="mt-5 pt-4 border-t border-border flex gap-3 justify-end">
               <Button variant="secondary" onClick={handleClear}>Cancel</Button>
