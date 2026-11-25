@@ -157,6 +157,55 @@ export async function runRealOcrTestSuite() {
   assert(realOcrResult.extractedData.mrp.value !== '₹45', 'Does NOT return hardcoded demo MRP ₹45');
   assert(realOcrResult.extractedData.productName.value !== 'ABC Premium Rice', 'Does NOT return hardcoded demo product name ABC Premium Rice');
 
+  // [13] Mobile Status Bar & Shopping App Noise Filtering + Vitamins Safe Context
+  console.log('\n[13] Test Case 13: Mobile Screenshot Status Bar & Nutrition Label Robustness');
+  const mobileScreenshotText = '2:17 al 56 E10\nDeliver in 10 mins\nVeeba Crunchy Peanut Butter\n380 g\nMRP (Incl. of all taxes) ₹199\nAdd to cart';
+  const parsedMobile = parseRealImageDeclarations(mobileScreenshotText, { imageId: 'IMG-M1', imageType: 'Front Label' });
+  assert(parsedMobile.productName.value === 'Veeba Crunchy Peanut Butter', 'Skips status bar ("2:17 al 56 E10") and UI chrome ("Deliver in 10 mins") to pick real Product Name');
+  assert(parsedMobile.mrp.value === '₹199', 'Extracts MRP when "(Incl. of all taxes)" sits between MRP and currency amount');
+  assert(parsedMobile.netQuantity.value === '380 g', 'Extracts 380 g net quantity cleanly');
+
+  const foodWithVitaminsText = 'Nutrition Facts\nPer 100 g: Energy 350 kcal, Protein 12 g, Vitamins A & C\nNet Quantity: 380 g\nDate of Packing: 08/2026\nBest Before 6 Months from Packaging\nManufactured & Packed By:\nITC Limited, Kolkata - 700071\nCountry of Origin: India\nConsumer Care Cell: Toll Free 1800-425-4444\nUnit Sale Price: Rs. 54.00 per kg';
+  const parsedNutrition = parseRealImageDeclarations(foodWithVitaminsText, { imageId: 'IMG-M2', imageType: 'Back Label' });
+  assert(parsedNutrition.netQuantity.value === '380 g', 'Prioritizes labeled Net Quantity (380 g) over Nutrition table ("100 g", "12 g")');
+  assert(parsedNutrition.manufactureDate.value === '08/2026', 'Extracts "Date of Packing: 08/2026" cleanly');
+  assert(parsedNutrition.expiryDate.value === '6 Months from Packaging', 'Extracts "Best Before 6 Months from Packaging" shelf-life statement');
+  assert(parsedNutrition.countryOfOrigin.value === 'India', 'Extracts clean Country of Origin ("India") without bleeding across newline into Consumer Care');
+  assert(parsedNutrition.manufacturer.value === 'ITC Limited, Kolkata - 700071', 'Extracts clean multi-line Manufacturer without bleeding into Country of Origin');
+  assert(parsedNutrition.unitSalePrice.value && parsedNutrition.unitSalePrice.value.includes('54.00'), 'Extracts Unit Sale Price declaration when present');
+
+  const vitaminsSinglePriceText = 'Whole Wheat Biscuits\nRich in Vitamins & Fiber\n₹45\nNet Wt: 200 g';
+  const parsedVitaminsPrice = parseRealImageDeclarations(vitaminsSinglePriceText);
+  assert(!parsedVitaminsPrice.mrp.remarks.includes('Online selling price'), '"Vitamins" in nutrition text does NOT falsely trigger Blinkit e-commerce mode');
+  assert(parsedVitaminsPrice.mrp.value === '₹45' && parsedVitaminsPrice.mrp.status === 'NEEDS_REVIEW', 'Single standalone price on physical pack surfaces ₹45 flagged as NEEDS_REVIEW');
+
+  // [14] Multi-Image Descriptive Fields (Product Name / Manufacturer) Do NOT Cause False Conflict Errors
+  console.log('\n[14] Test Case 14: Multi-Image Front vs Back Descriptive Merging (No False Conflict)');
+  const scanFrontReal = {
+    imageId: 'IMG-FR',
+    imageType: 'Front Label',
+    extractedData: {
+      productName: { value: 'Veeba Peanut Butter', confidence: 0.80 },
+      netQuantity: { value: '380 g', confidence: 0.95 },
+      mrp: { value: '₹199', confidence: 0.95 },
+      manufactureDate: { value: '08/2026', confidence: 0.90 },
+    },
+  };
+  const scanBackReal = {
+    imageId: 'IMG-BK',
+    imageType: 'Back Label',
+    extractedData: {
+      productName: { value: 'Nutritional Information', confidence: 0.80 },
+      netQuantity: { value: '380 g', confidence: 0.95 },
+      manufacturer: { value: 'VRB Consumer Products Pvt Ltd, Rajasthan - 301705', confidence: 0.90 },
+      manufactureDate: { value: '08-2026', confidence: 0.90 },
+    },
+  };
+  const fusedReal = fuseMultiImageScan([scanFrontReal, scanBackReal]);
+  assert(fusedReal.hasConflicts === false, 'Front vs Back differing Product Name / equivalent date (08/2026 == 08-2026) does NOT trigger false conflict error');
+  assert(fusedReal.unifiedData.productName.value === 'Veeba Peanut Butter', 'Multi-image fusion prefers Front Label for Product Name');
+  assert(fusedReal.unifiedData.manufacturer.value.includes('VRB Consumer Products'), 'Multi-image fusion retains Back Label Manufacturer details');
+
   console.log('\n============================================================');
   console.log(` Test Execution Complete: ${passed} Passed, ${failed} Failed`);
   console.log('============================================================\n');

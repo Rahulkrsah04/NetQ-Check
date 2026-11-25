@@ -3,7 +3,7 @@ import { useDropzone } from 'react-dropzone';
 import { Upload, Camera, Image, X, AlertCircle } from 'lucide-react';
 
 const ACCEPTED_TYPES = {
-  'image/jpeg': ['.jpg', '.jpeg'],
+  'image/jpeg': ['.jpg', '.jpeg', '.jfif'],
   'image/png': ['.png'],
   'image/webp': ['.webp'],
 };

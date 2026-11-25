@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { ShieldCheck, Info, ArrowRight, BookOpen, SearchCheck } from 'lucide-react';
-import { COMPLIANCE_RULES, RULE_CATEGORIES } from '../data/complianceRules';
+import { RULES_REPOSITORY, RULE_CATEGORIES, REQUIREMENT_TYPES, VALIDATION_TYPES } from '../services/ruleRepository/ruleRepository';
 
 export default function ComplianceRulesPublic() {
   return (
@@ -26,7 +26,7 @@ export default function ComplianceRulesPublic() {
 
         {/* Rules by category */}
         {RULE_CATEGORIES.map(cat => {
-          const catRules = COMPLIANCE_RULES.filter(r => r.category === cat);
+          const catRules = RULES_REPOSITORY.filter(r => r.category === cat);
           if (!catRules.length) return null;
           return (
             <div key={cat} className="mb-10">
@@ -35,30 +35,34 @@ export default function ComplianceRulesPublic() {
                 {cat}
               </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {catRules.map(rule => (
-                  <div key={rule.id} className="card flex flex-col justify-between">
-                    <div>
-                      <div className="flex items-start justify-between gap-2 mb-2">
-                        <h3 className="font-bold text-navy text-sm">{rule.name || rule.requirement}</h3>
-                        <span className={`badge flex-shrink-0 ${rule.mandatory ? 'bg-teal-100 text-teal-800' : 'bg-blue-100 text-blue-800'}`}>
-                          {rule.status}
-                        </span>
+                {catRules.map(rule => {
+                  const reqType = REQUIREMENT_TYPES[rule.requirementType] || REQUIREMENT_TYPES.MANDATORY;
+                  const valLabel = VALIDATION_TYPES[rule.validationType]?.label || rule.validationType;
+                  return (
+                    <div key={rule.id} className="card flex flex-col justify-between">
+                      <div>
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <h3 className="font-bold text-navy text-sm">{rule.name}</h3>
+                          <span className={`badge flex-shrink-0 ${reqType.badgeClass}`}>
+                            {reqType.label}
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-600 leading-relaxed mb-4">{rule.description}</p>
                       </div>
-                      <p className="text-xs text-gray-600 leading-relaxed mb-4">{rule.description}</p>
+                      
+                      <div className="pt-3 border-t border-gray-100 space-y-1.5 text-[11px] text-gray-500">
+                        <div className="flex items-center gap-1.5">
+                          <BookOpen className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                          <span className="truncate"><strong>Source:</strong> {rule.ruleReference}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <SearchCheck className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                          <span className="truncate"><strong>Verification:</strong> {valLabel}</span>
+                        </div>
+                      </div>
                     </div>
-                    
-                    <div className="pt-3 border-t border-gray-100 space-y-1.5 text-[11px] text-gray-500">
-                      <div className="flex items-center gap-1.5">
-                        <BookOpen className="w-3.5 h-3.5 text-primary flex-shrink-0" />
-                        <span className="truncate"><strong>Source:</strong> {rule.source || rule.legalRef}</span>
-                      </div>
-                      <div className="flex items-center gap-1.5">
-                        <SearchCheck className="w-3.5 h-3.5 text-primary flex-shrink-0" />
-                        <span className="truncate"><strong>Verification:</strong> {rule.verificationMethod}</span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           );

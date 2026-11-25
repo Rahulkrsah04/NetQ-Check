@@ -10,15 +10,17 @@ import { parseRealImageDeclarations } from './ocr/realOcrParser.js';
  * OCR Engine for processing real uploaded user product images
  */
 class RealImageOCRService {
-  async extractText(imageFile, isDemoPreset = false) {
+  async extractText(imageFile, isDemoPreset = false, metaOverrides = null) {
     // ONLY if explicitly marked as a demo preset from Quick Test UI, return preset scenario
     if (isDemoPreset || imageFile?.isDemoPreset) {
-      const filename = (imageFile?.name || '').toLowerCase();
+      const filename = (metaOverrides?.fileName || imageFile?.name || '').toLowerCase();
       return this._generateDemoPreset(filename);
     }
 
     try {
       let rawText = '';
+      let ocrLines = [];
+      let imageDimensions = { width: 0, height: 0 };
 
       // Try Tesseract.js in browser if available
       try {
@@ -31,8 +33,56 @@ class RealImageOCRService {
         }
 
         if (imageUrl) {
-          const { data } = await worker.recognize(imageUrl);
+          // Measure image dimensions before or alongside OCR
+          if (typeof Image !== 'undefined') {
+            try {
+              await new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => {
+                  imageDimensions = {
+                    width: img.naturalWidth || img.width || 0,
+                    height: img.naturalHeight || img.height || 0,
+                  };
+                  resolve();
+                };
+                img.onerror = () => resolve();
+                img.src = imageUrl;
+              });
+            } catch (_) {}
+          }
+
+          const { data } = await worker.recognize(imageUrl, {}, { text: true, blocks: true });
           rawText = data.text || '';
+
+          // Tesseract v5 places spatial lines inside data.blocks -> paragraphs -> lines
+          ocrLines = [];
+          if (Array.isArray(data.lines) && data.lines.length > 0) {
+            ocrLines = data.lines;
+          } else if (Array.isArray(data.blocks)) {
+            for (const b of data.blocks) {
+              for (const p of (b.paragraphs || [])) {
+                for (const l of (p.lines || [])) {
+                  if (l) ocrLines.push(l);
+                }
+              }
+            }
+          }
+
+          // If dimensions not obtained via Image, fallback to Tesseract line coordinate extremes
+          if (imageDimensions.width === 0 || imageDimensions.height === 0) {
+            let maxX = 0;
+            let maxY = 0;
+            for (const l of ocrLines) {
+              if (l.bbox) {
+                if (l.bbox.x1 > maxX) maxX = l.bbox.x1;
+                if (l.bbox.y1 > maxY) maxY = l.bbox.y1;
+              }
+            }
+            if (maxX > 0 && maxY > 0) {
+              imageDimensions = { width: maxX, height: maxY };
+            }
+          }
+
           if (typeof imageFile !== 'string' && imageUrl.startsWith('blob:')) {
             URL.revokeObjectURL(imageUrl);
           }
@@ -44,9 +94,11 @@ class RealImageOCRService {
 
       // If text extracted via OCR, parse declarations using Real Image OCR Parser
       const imageMeta = {
-        imageId: imageFile?.imageId || 'IMG-01',
-        imageType: imageFile?.imageType || 'Front Label',
-        fileName: imageFile?.name || imageFile?.fileName || 'label_image',
+        imageId: metaOverrides?.imageId || imageFile?.imageId || 'IMG-01',
+        imageType: metaOverrides?.imageType || imageFile?.imageType || 'Front Label',
+        fileName: metaOverrides?.fileName || imageFile?.name || imageFile?.fileName || 'label_image',
+        dimensions: imageDimensions,
+        lines: ocrLines,
       };
       const extractedData = parseRealImageDeclarations(rawText, imageMeta);
 
@@ -54,6 +106,11 @@ class RealImageOCRService {
         success: true,
         rawText,
         extractedData,
+        rawOCRData: {
+          text: rawText,
+          lines: ocrLines,
+          dimensions: imageDimensions,
+        },
         provider: 'real_ocr',
         isDemoData: false,
       };
@@ -64,8 +121,8 @@ class RealImageOCRService {
         success: true,
         rawText: '',
         extractedData: parseRealImageDeclarations('', {
-          imageId: imageFile?.imageId || 'IMG-01',
-          imageType: imageFile?.imageType || 'Front Label',
+          imageId: metaOverrides?.imageId || imageFile?.imageId || 'IMG-01',
+          imageType: metaOverrides?.imageType || imageFile?.imageType || 'Front Label',
         }),
         provider: 'real_ocr',
         isDemoData: false,
@@ -143,7 +200,7 @@ export const ocrService = new RealImageOCRService();
  * @param {Function} onProgress
  * @param {boolean} isDemoPreset - Set true ONLY when user selects a Quick Test demo preset
  */
-export async function processImage(imageFile, onProgress, isDemoPreset = false) {
+export async function processImage(imageFile, onProgress, isDemoPreset = false, imageMeta = null) {
   const steps = [
     'Image Quality Check',
     'OCR Text Extraction',
@@ -162,7 +219,7 @@ export async function processImage(imageFile, onProgress, isDemoPreset = false) 
     updateStep(0, 'done');
 
     updateStep(1, 'active');
-    const result = await ocrService.extractText(imageFile, isDemoPreset);
+    const result = await ocrService.extractText(imageFile, isDemoPreset, imageMeta);
     updateStep(1, 'done');
 
     updateStep(2, 'active');

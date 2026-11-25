@@ -20,6 +20,7 @@ export const DEFAULT_BOUNDING_BOXES = {
 
 /**
  * Attaches visual bounding box coordinates and evidence metadata to extracted fields
+ * Preserves genuine OCR coordinates; undetected or unmatched fields receive null bounding box.
  * @param {Object} extractedFields - Normalized or raw OCR extracted fields
  * @param {Array<Object>} images - List of uploaded label images
  * @returns {Object} Fields populated with visual evidence references
@@ -29,26 +30,39 @@ export function attachVisualEvidence(extractedFields = {}, images = []) {
 
   Object.entries(extractedFields).forEach(([fieldKey, fieldVal]) => {
     const valObj = typeof fieldVal === 'object' && fieldVal !== null ? fieldVal : { value: fieldVal, confidence: 0.9 };
-    const defaultCoords = DEFAULT_BOUNDING_BOXES[fieldKey] || { x: 20, y: 20, width: 60, height: 15, imageType: 'Front Label' };
 
-    // Select primary image or matching image type
-    const matchedImage = images.find(img => img.imageType === defaultCoords.imageType) || images[0] || null;
+    // Select matching image by sourceImageId, then sourceImageType, then fallback to images[0]
+    let matchedImage = null;
+    if (valObj.sourceImageId && Array.isArray(images)) {
+      matchedImage = images.find(img => img.imageId === valObj.sourceImageId);
+    }
+    if (!matchedImage && valObj.sourceImageType && Array.isArray(images)) {
+      matchedImage = images.find(img => img.imageType === valObj.sourceImageType);
+    }
+    if (!matchedImage && Array.isArray(images) && images.length > 0) {
+      matchedImage = images[0];
+    }
+
+    const hasRealBox = !!(valObj.boundingBox && typeof valObj.boundingBox === 'object' && valObj.boundingBox.width > 0);
+    const isDetected = valObj.value !== null && valObj.value !== undefined && String(valObj.value).trim() !== '' && valObj.status !== 'NOT_DETECTED';
+
+    // Genuine bounding box is preserved if detected; undetected or unmatched fields have null
+    const realBox = (isDetected && hasRealBox) ? valObj.boundingBox : null;
 
     mapped[fieldKey] = {
       ...valObj,
+      boundingBox: realBox,
+      imageRegion: realBox,
       evidence: {
-        imageId: matchedImage?.imageId || 'IMG-01',
-        imageType: defaultCoords.imageType,
-        sourceLabel: matchedImage?.fileName || defaultCoords.imageType,
+        imageId: matchedImage?.imageId || valObj.sourceImageId || 'IMG-01',
+        imageType: matchedImage?.imageType || valObj.sourceImageType || 'Front Label',
+        sourceLabel: matchedImage?.fileName || matchedImage?.imageType || valObj.sourceImageType || 'Front Label',
         imageUrl: matchedImage?.url || matchedImage?.preview || null,
-        boundingBox: valObj.boundingBox || {
-          x: defaultCoords.x,
-          y: defaultCoords.y,
-          width: defaultCoords.width,
-          height: defaultCoords.height,
-        },
+        boundingBox: realBox,
+        imageRegion: realBox,
         confidence: valObj.confidence || 0.90,
-        isDemoEvidence: !valObj.hasRealCoordinates,
+        hasRealCoordinates: hasRealBox,
+        isDetected,
       },
     };
   });
@@ -95,3 +109,57 @@ export function calculateEvidenceCoverage(checks = []) {
     tooltip: 'Percentage of applicable checks supported by identifiable inspection evidence.',
   };
 }
+
+/**
+ * Classify OCR numerical confidence score into confidence level
+ * @param {number} confidence - 0.0 to 1.0
+ * @returns {'high'|'moderate'|'review_recommended'}
+ */
+export function getConfidenceLevel(confidence) {
+  if (confidence >= 0.90) return 'high';
+  if (confidence >= 0.75) return 'moderate';
+  return 'review_recommended';
+}
+
+/**
+ * Create a structured evidence object for a specific field
+ * @param {string} fieldKey
+ * @param {Object} normalizedItem - normalized field item from dataNormalizer
+ * @param {string} [imageId=null]
+ * @returns {Object} Evidence object
+ */
+export function buildFieldEvidence(fieldKey, normalizedItem, imageId = null) {
+  const rawValue = normalizedItem?.value ?? null;
+  const normalizedValue = normalizedItem?.normalizedValue ?? rawValue;
+  const confidence = normalizedItem?.confidence ?? 0;
+  const confidenceLevel = getConfidenceLevel(confidence);
+  const imageRegion = normalizedItem?.imageRegion || normalizedItem?.boundingBox || null;
+
+  return {
+    field: fieldKey,
+    value: rawValue,
+    rawValue,
+    normalizedValue,
+    source: 'OCR Vision Engine',
+    confidence,
+    confidenceLevel,
+    imageRegion,
+    boundingBox: imageRegion,
+    imageId: imageId || 'IMG-SCAN-01',
+  };
+}
+
+/**
+ * Build complete evidence map for all extracted fields
+ * @param {Object} normalizedData
+ * @param {string} [imageId=null]
+ * @returns {Object} Map of field evidence objects
+ */
+export function buildEvidenceMap(normalizedData = {}, imageId = null) {
+  const map = {};
+  for (const [key, item] of Object.entries(normalizedData)) {
+    map[key] = buildFieldEvidence(key, item, imageId);
+  }
+  return map;
+}
+

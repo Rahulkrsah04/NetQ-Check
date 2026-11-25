@@ -65,6 +65,8 @@ export default function ScanProduct() {
   const [fusionResult, setFusionResult] = useState(null);
   const [qualityWarnings, setQualityWarnings] = useState([]);
   const [barcodeResults, setBarcodeResults] = useState([]);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [combinedRawText, setCombinedRawText] = useState('');
 
   const { processing, ocrResult, error, stage, startScan, runCompliance, reset } = useOCR();
   const { user } = useAuth();
@@ -128,6 +130,8 @@ export default function ScanProduct() {
     setFusionResult(null);
     setQualityWarnings([]);
     setBarcodeResults([]);
+    setIsAnalyzing(false);
+    setCombinedRawText('');
     reset();
   };
 
@@ -139,77 +143,133 @@ export default function ScanProduct() {
 
     setQualityWarnings([]);
     setBarcodeResults([]);
+    setIsAnalyzing(true);
+    setCombinedRawText('');
 
-    const multiScanData = [];
+    try {
+      const multiScanData = [];
+      const rawTextSegments = [];
 
-    // Run 8-step visual analysis pipeline
-    for (let i = 0; i < PROCESS_STEPS.length; i++) {
-      setAnalysisProgress({ stepIndex: i, stepName: PROCESS_STEPS[i] });
-      await new Promise(r => setTimeout(r, 200));
-    }
+      // Run visual analysis progress stepper
+      for (let i = 0; i < PROCESS_STEPS.length; i++) {
+        setAnalysisProgress({ stepIndex: i, stepName: PROCESS_STEPS[i] });
+        await new Promise(r => setTimeout(r, 150));
+      }
 
-    // Process each image through OCR, Barcode & Quality
-    for (const img of labelImages) {
-      const res = await startScan(img.file, img.isDemoPreset || false);
-
-      // Preprocessing
-      await preprocessImage(img.file);
-
-      // Barcode detection
-      const bc = await detectBarcodes(img.file, img.imageId);
-      setBarcodeResults(prev => [...prev, bc]);
-
-      let extracted = res?.extractedData || {};
-
-      // Handle Scenario 4 Conflict simulation if sample-conflict preset
-      if (img.fileName?.includes('conflict_back') && img.isDemoPreset) {
-        extracted = {
-          ...extracted,
-          mrp: { value: '₹125', confidence: 0.95 },
+      // Process each image through Preprocessing, OCR, Barcode & Quality
+      for (const img of labelImages) {
+        let ocrTarget = img.file;
+        let preprocessedInfo = null;
+        const imgMeta = {
+          imageId: img.imageId,
+          imageType: img.imageType,
+          fileName: img.fileName,
         };
+
+        // 1. Run genuine Canvas Preprocessing BEFORE OCR
+        try {
+          preprocessedInfo = await preprocessImage(img.file);
+          if (preprocessedInfo?.processedBlob) {
+            ocrTarget = preprocessedInfo.processedBlob;
+            img.preprocessed = preprocessedInfo;
+          }
+        } catch (prepErr) {
+          console.warn(`Preprocessing fallback triggered for ${img.fileName}:`, prepErr);
+        }
+
+        // 2. OCR extraction using preprocessed image (or original fallback)
+        let res = await startScan(ocrTarget, img.isDemoPreset || false, imgMeta);
+
+        // Color-preservation fallback: if grayscale/contrast preprocessing yielded minimal text
+        // on colored packaging, retry OCR on the original uploaded image and keep richer output.
+        if (!img.isDemoPreset && ocrTarget !== img.file && (!res?.rawText || res.rawText.trim().length < 15)) {
+          const origRes = await startScan(img.file, false, imgMeta);
+          if (origRes && (origRes.rawText || '').trim().length > (res?.rawText || '').trim().length) {
+            res = origRes;
+          }
+        }
+
+        if (res?.rawText && res.rawText.trim()) {
+          rawTextSegments.push(`[${img.imageType} — ${img.fileName}]\n${res.rawText.trim()}`);
+        }
+
+        // 3. Barcode detection
+        const bc = await detectBarcodes(img.file, img.imageId);
+        setBarcodeResults(prev => [...prev, bc]);
+
+        let extracted = res?.extractedData || {};
+
+        // Handle Scenario 4 Conflict simulation if sample-conflict preset
+        if (img.fileName?.includes('conflict_back') && img.isDemoPreset) {
+          extracted = {
+            ...extracted,
+            mrp: { value: '₹125', confidence: 0.95 },
+          };
+        }
+
+        multiScanData.push({
+          imageId: img.imageId,
+          imageType: img.imageType,
+          extractedData: extracted,
+          rawOCRData: res?.rawOCRData,
+        });
       }
 
-      multiScanData.push({
-        imageId: img.imageId,
-        imageType: img.imageType,
-        extractedData: extracted,
-        rawOCRData: res?.rawOCRData,
-      });
-    }
+      const joinedRawText = rawTextSegments.join('\n\n');
+      setCombinedRawText(joinedRawText);
 
-    // Data Fusion across images
-    const fused = fuseMultiImageScan(multiScanData);
-    setFusionResult(fused);
+      // Data Fusion across images
+      const fused = fuseMultiImageScan(multiScanData);
+      setFusionResult(fused);
 
-    if (fused.hasConflicts) {
-      toast.error('CONFLICT DETECTED: Conflicting MRP values found across Front & Back labels!', { duration: 5000 });
-    }
-
-    // Match existing products if productName extracted
-    const primaryName = fused.unifiedData?.productName?.value;
-    if (primaryName) {
-      const matches = findMatchingProducts({
-        productName: primaryName,
-        categoryId: selectedCategory,
-      });
-      setMatchedProducts(matches);
-      if (matches.length > 0) {
-        setSelectedProductId(matches[0].product.productId);
+      if (fused.hasConflicts) {
+        const conflictFields = fused.conflicts.map(c => c.fieldLabel).join(', ');
+        toast.error(`CONFLICT DETECTED: Conflicting ${conflictFields} found across label images!`, { duration: 5000 });
       }
+
+      const primaryName = fused.unifiedData?.productName?.value || '';
+
+      // Auto-detect commodity category from extracted text when using default category
+      if (selectedCategory === 'GENERAL_PACKAGED' && !labelImages.some(img => img.isDemoPreset)) {
+        const detectedCat = detectCategoryFromText(joinedRawText, primaryName);
+        if (detectedCat?.id) {
+          setSelectedCategory(detectedCat.id);
+        }
+      }
+
+      // Match existing products if productName extracted
+      if (primaryName) {
+        const matches = findMatchingProducts({
+          productName: primaryName,
+          categoryId: selectedCategory,
+        });
+        setMatchedProducts(matches);
+        if (matches.length > 0) {
+          setSelectedProductId(matches[0].product.productId);
+        }
+      }
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
   const handleAutoDetectCategory = () => {
     const productName = editedData?.productName?.value || fusionResult?.unifiedData?.productName?.value || '';
-    const detected = detectCategoryFromText(productName, productName);
+    const detected = detectCategoryFromText(combinedRawText || productName, productName);
     setSelectedCategory(detected.id);
     toast.success(`Auto-detected Category: ${detected.name}`);
   };
 
   const handleFieldEdit = (key, val) => {
+    const baseField = fusionResult?.unifiedData?.[key] || ocrResult?.extractedData?.[key] || {};
     setEditedData(prev => ({
       ...prev,
-      [key]: { value: val, confidence: prev[key]?.confidence ?? 0.5 },
+      [key]: {
+        ...baseField,
+        value: val,
+        confidence: val && val.trim() ? Math.max(baseField.confidence || 0.85, 0.85) : 0,
+        manualVerificationRequired: false,
+      },
     }));
   };
 
@@ -263,7 +323,7 @@ export default function ScanProduct() {
     const scanRecord = createScan({
       productId: activeProduct.productId,
       images: labelImages.map(img => img.preview),
-      rawOCRData: { text: ocrResult?.rawText || 'Multi-Image Fusion OCR' },
+      rawOCRData: { text: combinedRawText || ocrResult?.rawText || 'Multi-Image Fusion OCR' },
       normalizedData: mappedWithEvidence,
       category: selectedCategory,
       status: result.overallStatus,
@@ -294,7 +354,8 @@ export default function ScanProduct() {
       normalizedValue: val.normalizedValue || val.value || '',
       confidence: val.confidence || 0,
       source: val.evidence?.sourceLabel || 'OCR_VISION',
-      imageRegion: val.evidence?.boundingBox || { x: 15, y: 15, width: 60, height: 15 },
+      imageId: val.evidence?.imageId || val.sourceImageId || null,
+      imageRegion: val.evidence?.boundingBox || null,
     }));
     saveEvidenceItems(scanRecord.scanId, evidenceList);
 
@@ -354,7 +415,7 @@ export default function ScanProduct() {
       )}
 
       {/* Upload & Multi-Image Section */}
-      {(stage === 'idle' || stage === 'processing') && (
+      {(stage === 'idle' || stage === 'processing' || isAnalyzing) && (
         <div className="card space-y-5">
           <div className="flex items-center justify-between border-b border-border pb-3 flex-wrap gap-2">
             <h2 className="text-sm font-bold text-navy flex items-center gap-2">
@@ -406,7 +467,7 @@ export default function ScanProduct() {
             </div>
           )}
 
-          {labelImages.length > 0 && stage !== 'processing' && (
+          {labelImages.length > 0 && stage !== 'processing' && !isAnalyzing && (
             <div className="pt-3 border-t border-border flex justify-end">
               <Button
                 id="analyze-product-btn"
@@ -414,7 +475,7 @@ export default function ScanProduct() {
                 size="lg"
                 icon={PlayCircle}
                 onClick={handleAnalyze}
-                loading={processing}
+                loading={processing || isAnalyzing}
                 className="shadow-sm"
               >
                 Start Visual Inspection Analysis ({labelImages.length} Label Images)
@@ -423,7 +484,7 @@ export default function ScanProduct() {
           )}
 
           {/* Processing 8-Step Progress */}
-          {stage === 'processing' && analysisProgress && (
+          {(stage === 'processing' || isAnalyzing) && analysisProgress && (
             <div className="p-4 bg-gray-50 rounded-xl border border-border">
               <h3 className="text-sm font-semibold text-navy mb-4">Running Visual Inspection Analysis…</h3>
               <ProgressStepper
@@ -436,7 +497,7 @@ export default function ScanProduct() {
       )}
 
       {/* Inspection Results Review & Conflict Warning */}
-      {(stage === 'review' || stage === 'done') && (fusionResult || ocrResult) && (
+      {!isAnalyzing && (stage === 'review' || stage === 'done') && (fusionResult || ocrResult) && (
         <div className="space-y-4">
           {/* CONFLICT DETECTED ALERT BANNER */}
           {fusionResult?.hasConflicts && (
@@ -451,7 +512,7 @@ export default function ScanProduct() {
                     </span>
                   </h3>
                   <p className="text-xs text-red-800 mt-1">
-                    Different values were extracted for mandatory declarations between Front and Back labels. This assessment will be set to <strong>NEEDS REVIEW</strong>.
+                    Different values were extracted for statutory declarations across label images. This assessment will be set to <strong>NEEDS REVIEW</strong>.
                   </p>
                   <div className="mt-2 text-xs font-mono bg-white p-2.5 rounded border border-red-200 space-y-1">
                     {fusionResult.conflicts.map((c, i) => (
@@ -460,6 +521,21 @@ export default function ScanProduct() {
                       </div>
                     ))}
                   </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* SPARSE / NO OCR TEXT ADVISORY */}
+          {!combinedRawText.trim() && !labelImages.some(img => img.isDemoPreset) && (
+            <div className="card bg-amber-50 border border-amber-200 p-4">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div className="text-xs text-amber-900">
+                  <div className="font-bold">Limited text recognized from uploaded photo</div>
+                  <p className="mt-0.5 opacity-90">
+                    The photo may be blurred, angled, or low-contrast. You can enter or correct product declarations below and still generate your compliance screening results.
+                  </p>
                 </div>
               </div>
             </div>
@@ -514,9 +590,15 @@ export default function ScanProduct() {
                 const displayVal = editedVal?.value ?? fieldVal?.value ?? '';
                 const conf = editedVal?.confidence ?? fieldVal?.confidence ?? 0;
                 const isConflict = fieldVal?.conflictDetected || false;
-                const remarks = fieldVal?.remarks || (displayVal ? 'Extracted from label' : 'NOT_DETECTED — Manual Verification Required');
+                const needsManualReview = !isConflict && conf > 0 && (conf < 0.75 || fieldVal?.manualVerificationRequired);
+                const remarks = fieldVal?.remarks || (displayVal ? 'Extracted from label' : 'Not detected in uploaded image');
                 const sourceBadge = fieldVal?.sourceImageType || fieldVal?.imageType || null;
                 const onlinePrice = fieldVal?.onlineSellingPrice || null;
+                const inputPlaceholder = displayVal
+                  ? ''
+                  : onlinePrice
+                    ? `Online app price ${onlinePrice} — enter printed MRP if shown`
+                    : 'Not detected — enter manually if visible';
 
                 return (
                   <div key={key} className={`py-3 grid grid-cols-1 sm:grid-cols-5 gap-2 sm:gap-4 items-center ${isConflict ? 'bg-red-50/50 p-2 rounded' : ''}`}>
@@ -533,10 +615,15 @@ export default function ScanProduct() {
                         type="text"
                         className={`form-input text-sm ${isConflict ? 'border-red-400 bg-red-50 text-red-900 font-bold' : ''} ${!displayVal ? 'border-amber-300 bg-amber-50/50 text-amber-900' : ''}`}
                         value={displayVal}
-                        placeholder={remarks}
+                        placeholder={inputPlaceholder}
                         onChange={e => handleFieldEdit(key, e.target.value)}
                       />
                       {!displayVal && (
+                        <div className="text-[10px] text-amber-700 font-medium mt-0.5">
+                          {remarks}
+                        </div>
+                      )}
+                      {displayVal && needsManualReview && (
                         <div className="text-[10px] text-amber-700 font-medium mt-0.5">
                           {remarks}
                         </div>
@@ -564,6 +651,10 @@ export default function ScanProduct() {
                         <span className="text-xs text-red-600 font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3 h-3" /> Conflict
                         </span>
+                      ) : needsManualReview ? (
+                        <span className="text-xs text-amber-700 font-bold flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" /> Needs Review ({Math.round(conf * 100)}%)
+                        </span>
                       ) : conf > 0 ? (
                         <span className="text-xs text-success flex items-center gap-1">
                           <CheckCircle className="w-3 h-3" /> Verified ({Math.round(conf * 100)}%)
@@ -580,14 +671,14 @@ export default function ScanProduct() {
             </div>
 
             {/* Collapsible Raw OCR Transcript for Audit & Verification */}
-            {ocrResult?.rawText && (
+            {(combinedRawText || ocrResult?.rawText) && (
               <details className="mt-4 pt-3 border-t border-border group">
                 <summary className="text-xs font-semibold text-slate-600 cursor-pointer hover:text-teal-700 select-none flex items-center gap-1.5">
                   <Info className="w-3.5 h-3.5 text-teal-600" />
                   View Raw OCR Transcript (Auditing & Verification)
                 </summary>
                 <div className="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-800 whitespace-pre-wrap max-h-48 overflow-y-auto">
-                  {ocrResult.rawText}
+                  {combinedRawText || ocrResult?.rawText}
                 </div>
               </details>
             )}

@@ -226,3 +226,9 @@ export function getRuleById(id) {
 export function getRulesByCategory(categoryName) {
   return RULES_REPOSITORY.filter(r => r.category === categoryName);
 }
+
+/**
+ * Dynamically derived unique categories from the authoritative rules repository
+ */
+export const RULE_CATEGORIES = [...new Set(RULES_REPOSITORY.map(r => r.category))];
+

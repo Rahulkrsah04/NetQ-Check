@@ -80,11 +80,12 @@ export function extractMRP(text) {
   const cleanedText = safeContextualClean(text);
 
   // 1. Strict Physical Package MRP regex (requires packaging context)
-  // E.g.: "M.R.P. ₹120.00", "MRP: Rs. 120/- (Incl. of all taxes)", "Maximum Retail Price: ₹ 120"
-  const packageMrpRegex = /(?:m\.?r\.?p\.?|maximum\s*retail\s*price|max\s*retail\s*price)\s*[:\-]?\s*(?:rs\.?|₹|inr)?\s*([\d,]+(?:\.\d{1,2})?)(?:\s*\/\-)?(?:\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?all\s*taxes\)?)?/i;
-  
-  // Also check for "Inclusive of all taxes" trailing clause which confirms printed package price
-  const taxClauseRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\-)?\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?all\s*taxes\)?/i;
+  // Handles optional "(Incl. of all taxes)" between MRP and amount, spaced "M R P", and common OCR currency glyphs
+  const packageMrpRegex = /(?:m\.?\s*r\.?\s*p\.?|maximum\s*retail\s*price|max\.?\s*retail\s*price)(?:\s*\(?\s*(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\s*\)?)?\s*[:\-;|]?\s*(?:rs\.?|₹|inr|re\.?|[?*=¥£€])?\s*([\d,]+(?:\.\d{1,2})?)(?:\s*\/\-)?(?:\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\)?)?/i;
+
+  // Also check for "Inclusive of all taxes" trailing clause or trailing "(MRP)" which confirms printed package price
+  const taxClauseRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\-)?\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\)?/i;
+  const trailingMrpRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\-)?\s*\(?\s*(?:m\.?\s*r\.?\s*p\.?|maximum\s*retail\s*price)\s*\)?/i;
 
   let packageMRP = null;
   let onlineSellingPrice = null;
@@ -93,16 +94,22 @@ export function extractMRP(text) {
   let isAmbiguous = false;
   let uncertainCorrection = false;
 
-  const pkgMatch = cleanedText.match(packageMrpRegex) || cleanedText.match(taxClauseRegex);
+  const pkgMatch =
+    cleanedText.match(packageMrpRegex) ||
+    cleanedText.match(taxClauseRegex) ||
+    cleanedText.match(trailingMrpRegex);
 
-  // Detect online e-commerce / Blinkit UI chrome context
-  const isBlinkitContext = /blinkit|deliver\s*in|mins|add\s*to\s*cart|\bcart\b|checkout|\b\d+%\s*off\b|save\s*(?:rs\.?|₹)/i.test(cleanedText);
+  // Detect online e-commerce / shopping app UI chrome context (word-bounded so "Vitamins" etc. never match)
+  const isBlinkitContext = /\b(?:blinkit|zepto|instamart|swiggy|bigbasket|jiomart|amazon|flipkart)\b|\bdeliver(?:y|ing)?\s+in\s+\d+\s*mins?\b|\badd\s+to\s+cart\b|\bview\s+cart\b|\bcheckout\b|\b\d{1,2}%\s*off\b|\bsave\s*(?:rs\.?|₹)/i.test(cleanedText);
 
-  // Find all standalone currency/price candidates
+  // Find all standalone currency/price candidates (excluding Unit Sale Price / per-unit rates)
   const standalonePriceRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)/gi;
   const standaloneMatches = [];
-  
+
   for (const line of lines) {
+    if (/\b(?:unit\s*sale\s*price|usp)\b|(?:per|\/)\s*(?:kg|g|gm|gms|ml|l|ltr|litre|unit|pc|100\s*g|100\s*ml)\b/i.test(line)) {
+      continue;
+    }
     let match;
     while ((match = standalonePriceRegex.exec(line)) !== null) {
       const numStr = match[1];
@@ -141,19 +148,19 @@ export function extractMRP(text) {
       }
     }
   } else if (isBlinkitContext && standaloneMatches.length > 0) {
-    // In Blinkit screenshot without explicit printed package MRP:
+    // In e-commerce screenshot without explicit printed package MRP:
     // The price shown is an online selling / discount price, NOT statutory package MRP.
     onlineSellingPrice = `₹${standaloneMatches[0].amount}`;
     packageMRP = null;
     confidence = 0;
     // Do not fabricate an MRP or assume online price is package MRP!
   } else if (standaloneMatches.length === 1 && !isBlinkitContext) {
-    // Only one standalone price and no explicit MRP keyword:
-    // We do NOT assume a price is MRP merely because it appears near a currency symbol.
-    // Flag for manual verification.
+    // Single unlabeled currency price on a physical product photo:
+    // Surface detected price with Needs Review status so inspector can confirm if printed MRP.
+    packageMRP = `₹${standaloneMatches[0].amount}`;
     isAmbiguous = true;
     originalValue = standaloneMatches[0].fullMatch;
-    confidence = 0.60;
+    confidence = 0.65;
   } else if (standaloneMatches.length > 1) {
     // Multiple unlabeled prices: strictly ambiguous
     isAmbiguous = true;
@@ -164,13 +171,15 @@ export function extractMRP(text) {
 
   let remarks = 'Extracted from physical package label';
   if (notVisible) {
-    remarks = isBlinkitContext 
-      ? `Online selling price ${onlineSellingPrice || ''} detected, but package-printed MRP is not visible in provided screenshot — upload back/side label image.`
+    remarks = isBlinkitContext
+      ? `Online selling price ${onlineSellingPrice || ''} detected — verify printed MRP on back/side label`
       : 'MRP not visible in provided image — upload back/side label image.';
-  } else if (isAmbiguous) {
-    remarks = 'Manual Verification Required — Price detected without explicit statutory MRP packaging attribution.';
+  } else if (isAmbiguous && !packageMRP) {
+    remarks = 'Manual Verification Required — Multiple prices detected without explicit MRP attribution.';
+  } else if (isAmbiguous && packageMRP) {
+    remarks = 'Currency price detected without explicit "MRP" prefix — please verify printed MRP.';
   } else if (onlineSellingPrice) {
-    remarks = `Package MRP: ${packageMRP} (Blinkit Online Selling Price: ${onlineSellingPrice})`;
+    remarks = `Package MRP: ${packageMRP} (Online Selling Price: ${onlineSellingPrice})`;
   }
 
   return {
@@ -197,28 +206,52 @@ export function extractNetQuantity(text) {
   }
 
   const cleanedText = safeContextualClean(text);
+  const unitPattern = '(kg|g|gm|gms|gram|grams|ml|l|ltr|ltrs|litre|liter|litres|liters|mg|pcs|pc|pieces|nos|units|unit)';
 
-  // Regex requiring standard SI quantity units
-  const qtyRegex = /(?:net\s*(?:qty|quantity|wt|weight|vol|volume|content)[:\-]?\s*)?(\d+(?:\.\d+)?)\s*(kg|g|gm|gram|grams|ml|l|ltr|litre|liter|mg|pcs|pieces|nos|units)\b/i;
-  const match = cleanedText.match(qtyRegex);
+  const normalizeUnit = (rawUnit) => {
+    const u = rawUnit.toLowerCase();
+    if (['g', 'gm', 'gms', 'gram', 'grams'].includes(u)) return 'g';
+    if (['l', 'ltr', 'ltrs', 'litre', 'liter', 'litres', 'liters'].includes(u)) return 'L';
+    if (u === 'ml') return 'ml';
+    if (u === 'kg') return 'kg';
+    if (u === 'mg') return 'mg';
+    if (['pcs', 'pc', 'pieces', 'nos', 'units', 'unit'].includes(u)) return 'pcs';
+    return u;
+  };
 
-  if (match) {
-    const rawNum = match[1];
-    let unit = match[2].toLowerCase();
-
-    // Standardize SI unit notation
-    if (['g', 'gm', 'gram', 'grams'].includes(unit)) unit = 'g';
-    else if (['l', 'ltr', 'litre', 'liter'].includes(unit)) unit = 'L';
-    else if (['ml'].includes(unit)) unit = 'ml';
-    else if (['kg'].includes(unit)) unit = 'kg';
-    else if (['pcs', 'pieces', 'nos', 'units'].includes(unit)) unit = 'pcs';
-
+  // 1. Prioritize explicitly labeled Net Quantity / Weight / Volume lines
+  const labeledQtyRegex = new RegExp(
+    `(?:net\\s*(?:qty|quantity|wt|weight|vol|volume|content\\.?)|n\\.?\\s*w\\.?|quantity|weight|volume|qty)\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*${unitPattern}\\b`,
+    'i'
+  );
+  const labeledMatch = cleanedText.match(labeledQtyRegex);
+  if (labeledMatch) {
+    const unit = normalizeUnit(labeledMatch[2]);
     return {
-      value: `${rawNum} ${unit}`,
-      originalValue: match[0].trim(),
-      confidence: 0.95,
+      value: `${labeledMatch[1]} ${unit}`,
+      originalValue: labeledMatch[0].trim(),
+      confidence: 0.96,
       uncertainCorrection: false,
     };
+  }
+
+  // 2. Fallback: scan lines for standalone SI unit quantity while skipping nutrition tables & USP rates
+  const standaloneQtyRegex = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${unitPattern}\\b`, 'i');
+  const nutritionOrRateRegex = /\b(?:per\s*100|serving|energy|protein|carbohydrate|carbs|sugar|fat|saturated|trans|cholesterol|fibre|fiber|sodium|calcium|iron|vitamin|kcal|rda|unit\s*sale\s*price|usp)\b|(?:per|\/)\s*(?:100\s*g|100\s*ml|kg|g|gm|ml|l)\b/i;
+
+  const lines = cleanedText.split('\n').map(l => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (nutritionOrRateRegex.test(line)) continue;
+    const match = line.match(standaloneQtyRegex);
+    if (match) {
+      const unit = normalizeUnit(match[2]);
+      return {
+        value: `${match[1]} ${unit}`,
+        originalValue: match[0].trim(),
+        confidence: 0.95,
+        uncertainCorrection: false,
+      };
+    }
   }
 
   return { value: null, originalValue: null, confidence: 0, uncertainCorrection: false };
@@ -226,7 +259,7 @@ export function extractNetQuantity(text) {
 
 /**
  * Extracts Manufacturer / Packer details from text
- * Filters out statutory FSSAI and telephone noise.
+ * Filters out statutory FSSAI and telephone noise and stops before adjacent declarations.
  * @param {string} text
  * @returns {Object} { value, originalValue, confidence }
  */
@@ -235,13 +268,21 @@ export function extractManufacturer(text) {
     return { value: null, originalValue: null, confidence: 0 };
   }
 
-  const mfgRegex = /(?:mfd\.?\s*by|manufactured\s*by|packed\s*by|marketed\s*by|imported\s*by|packer)[:\-]?\s*([^\n]+(?:\n[^\n]+)?)/i;
+  const mfgRegex = /(?:(?:manufactured|mfd\.?|marketed|mktd\.?|packed|pkd\.?|imported|distributed)(?:\s*(?:&|and|\/|,)\s*(?:manufactured|mfd\.?|marketed|mktd\.?|packed|pkd\.?|imported|distributed))*\s*by|(?:manufacturer|packer|importer|regd\.?\s*office))[:\-]?\s*([^\n]+(?:\n[^\n]+){0,2})/i;
   const match = text.match(mfgRegex);
 
-  if (match && match[1] && match[1].trim().length > 3) {
-    const rawVal = match[1].trim().replace(/\s+/g, ' ');
-    // Filter out if it's purely a license number
-    if (!/^\d+$/.test(rawVal)) {
+  if (match && match[1]) {
+    const rawLines = match[1].split('\n').map(l => l.trim()).filter(Boolean);
+    const stopLineRegex = /^(?:country\s*of\s*origin|made\s*in|consumer\s*care|customer\s*care|toll\s*free|helpline|m\.?\s*r\.?\s*p|maximum\s*retail|net\s*(?:qty|quantity|wt|weight|vol)|best\s*before|use\s*by|date\s*of|mfg|pkd|unit\s*sale\s*price|usp|fssai\s*lic)/i;
+
+    const keptLines = [];
+    for (const line of rawLines) {
+      if (stopLineRegex.test(line)) break;
+      keptLines.push(line);
+    }
+
+    const rawVal = keptLines.join(', ').replace(/\s+/g, ' ').replace(/^[:\-,\s]+/, '').trim();
+    if (rawVal.length > 3 && !/^\d+$/.test(rawVal)) {
       return {
         value: rawVal,
         originalValue: match[0].trim(),
@@ -255,7 +296,7 @@ export function extractManufacturer(text) {
 
 /**
  * Extracts Manufacturing and Expiry dates
- * Supports MM/YYYY, DD/MM/YYYY, Month YYYY.
+ * Supports MM/YYYY, DD/MM/YYYY, Month YYYY, Date of Packing, and Best Before periods.
  * @param {string} text
  * @returns {Object} { manufactureDate, expiryDate }
  */
@@ -267,15 +308,22 @@ export function extractDates(text) {
     };
   }
 
-  const mfgRegex = /(?:mfg|mfd|manufactured|packed|pkd)\s*(?:date|:)?\s*(\d{2}[\/\-]\d{4}|\d{2}[\/\-]\d{2}|[a-z]{3}\s*\d{4})/i;
-  const expRegex = /(?:best\s*before|use\s*by|exp|expiry|bb)\s*:?\s*(\d{2}[\/\-]\d{4}|\d{2}[\/\-]\d{2}|[a-z]{3}\s*\d{4})/i;
+  const datePattern = '(\\d{2}[\\/.\\-]\\d{2}[\\/.\\-]\\d{2,4}|\\d{2}[\\/.\\-]\\d{4}|\\d{2}[\\/.\\-]\\d{2}|[a-z]{3,9}\\s*[\\-,\\/\\s]?\\s*\\d{2,4})';
+  const mfgRegex = new RegExp(
+    `(?:date\\s*of\\s*(?:manufacture|mfg|packing|pkg)|(?:mfg|mfd|manufactured|packed|packing|pkd|pkg)\\s*(?:date|on)?)\\s*[:\\-]?\\s*${datePattern}`,
+    'i'
+  );
+  const expRegex = new RegExp(
+    `(?:best\\s*before|use\\s*by|exp\\.?\\s*date|expiry\\s*date|exp|expiry|bb)\\s*[:\\-]?\\s*(${datePattern.slice(1, -1)}|\\d+\\s*(?:months?|days?|years?)\\s*(?:from\\s*(?:date\\s*of\\s*)?(?:packaging|packing|pkg|manufacture|mfg|mfd))?)`,
+    'i'
+  );
 
   const mfgMatch = text.match(mfgRegex);
   const expMatch = text.match(expRegex);
 
   return {
-    manufactureDate: mfgMatch ? { value: mfgMatch[1], originalValue: mfgMatch[0].trim(), confidence: 0.90 } : { value: null, originalValue: null, confidence: 0 },
-    expiryDate: expMatch ? { value: expMatch[1], originalValue: expMatch[0].trim(), confidence: 0.90 } : { value: null, originalValue: null, confidence: 0 },
+    manufactureDate: mfgMatch ? { value: mfgMatch[1].trim(), originalValue: mfgMatch[0].trim(), confidence: 0.90 } : { value: null, originalValue: null, confidence: 0 },
+    expiryDate: expMatch ? { value: expMatch[1].trim(), originalValue: expMatch[0].trim(), confidence: 0.90 } : { value: null, originalValue: null, confidence: 0 },
   };
 }
 
@@ -289,7 +337,7 @@ export function extractConsumerCare(text) {
     return { value: null, originalValue: null, confidence: 0 };
   }
 
-  const careRegex = /(?:consumer|customer|helpline|care|feedback|toll\s*free)\s*(?:no|number|cell|email|:)?\s*([+\d\s\-]{8,14}|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i;
+  const careRegex = /(?:consumer|customer|helpline|care|feedback|toll\s*free)\s*(?:no\.?|number|cell|desk|details|email|toll\s*free|:|-)*\s*([+\d][\d\s\-]{7,14}|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i;
   const match = text.match(careRegex);
 
   if (match && match[1]) {
@@ -304,7 +352,7 @@ export function extractConsumerCare(text) {
 }
 
 /**
- * Extracts Country of Origin
+ * Extracts Country of Origin (strictly within the same line to prevent bleed)
  * @param {string} text
  * @returns {Object} { value, originalValue, confidence }
  */
@@ -313,14 +361,42 @@ export function extractCountryOfOrigin(text) {
     return { value: null, originalValue: null, confidence: 0 };
   }
 
-  const countryRegex = /(?:country\s*of\s*origin|made\s*in|product\s*of)\s*:?\s*([a-zA-Z\s]+)/i;
+  const countryRegex = /(?:country\s*of\s*origin|made\s*in|product\s*of)\s*[:\-]?\s*([a-zA-Z ]+)/i;
   const match = text.match(countryRegex);
 
-  if (match && match[1] && match[1].trim().length > 2) {
+  if (match && match[1]) {
+    const country = match[1].trim();
+    if (country.length > 2) {
+      return {
+        value: country,
+        originalValue: match[0].trim(),
+        confidence: 0.92,
+      };
+    }
+  }
+
+  return { value: null, originalValue: null, confidence: 0 };
+}
+
+/**
+ * Extracts Unit Sale Price (USP) when declared on label or shopping card
+ * @param {string} text
+ * @returns {Object} { value, originalValue, confidence }
+ */
+export function extractUnitSalePrice(text) {
+  if (!text || typeof text !== 'string') {
+    return { value: null, originalValue: null, confidence: 0 };
+  }
+
+  const uspPrefixRegex = /(?:unit\s*sale\s*price|u\.?s\.?p\.?)\s*[:\-]?\s*((?:rs\.?|₹|inr)\s*[\d,]+(?:\.\d{1,2})?\s*(?:per|\/)\s*(?:100\s*g|100\s*ml|kg|g|gm|ml|l|ltr|unit|pc)[a-z]*)/i;
+  const inlineUspRegex = /\(?\s*((?:rs\.?|₹|inr)\s*[\d,]+(?:\.\d{1,2})?\s*(?:per|\/)\s*(?:100\s*g|100\s*ml|kg|g|ml|l|unit|pc))\s*\)?/i;
+
+  const match = text.match(uspPrefixRegex) || text.match(inlineUspRegex);
+  if (match && match[1]) {
     return {
       value: match[1].trim(),
       originalValue: match[0].trim(),
-      confidence: 0.92,
+      confidence: 0.88,
     };
   }
 
@@ -328,7 +404,8 @@ export function extractCountryOfOrigin(text) {
 }
 
 /**
- * Extracts Product Name and Brand while filtering out Blinkit UI chrome lines
+ * Extracts Product Name and Brand while filtering out mobile status bars,
+ * e-commerce UI chrome lines, statutory headers, and OCR gibberish.
  * @param {string} text
  * @returns {Object} { productName, brand }
  */
@@ -340,11 +417,41 @@ export function extractProductNameAndBrand(text) {
     };
   }
 
+  const isNoiseOrChromeLine = (line) => {
+    if (!line || line.length < 3) return true;
+    // Mobile status bar time, signal/battery indicators (e.g. "2:17 al 56 E10", "10:45 5G 84%")
+    if (/^\d{1,2}[:.]\d{2}\b/.test(line)) return true;
+    if (/\b(?:lte|volte|4g|5g|wifi|kb\/s|mb\/s)\b/i.test(line)) return true;
+    if (/^\d{1,3}\s*%$/.test(line)) return true;
+
+    // Require at least one genuine 3+ letter English word (rejects symbol/numeric/short-code gibberish)
+    const alphaMatches = line.match(/[a-zA-Z]{3,}/g) || [];
+    if (alphaMatches.length === 0) return true;
+
+    // E-commerce UI chrome lines
+    if (/\b(?:blinkit|zepto|instamart|swiggy|bigbasket|jiomart|amazon|flipkart|deliver(?:y|ing)?\s+in|add\s+to\s+cart|view\s+cart|checkout|product\s+details|key\s+features|highlights|ratings?\s*(?:&|and)?\s*reviews?|you\s+save|buy\s+now|out\s+of\s+stock|in\s+stock|free\s+delivery|see\s+all|view\s+all|\d+%\s*off)\b/i.test(line)) {
+      return true;
+    }
+    if (/^(?:blinkit|search|cart|home|deliver|mins|add|checkout|bill|order|total|save|discount|ratings?|reviews?|share|back)$/i.test(line)) {
+      return true;
+    }
+
+    // Statutory / non-title packaging section lines
+    if (/^(?:net\s*(?:qty|quantity|wt|weight|vol|volume|content)|m\.?\s*r\.?\s*p|maximum\s*retail|incl\.?\s*of|inclusive\s*of|mfg|mfd|date\s*of|packed|pkd|best\s*before|use\s*by|exp|expiry|manufactured|marketed|imported|distributed|fssai|lic\.?\s*no|batch|lot\s*no|country\s*of\s*origin|made\s*in|consumer\s*care|customer\s*care|toll\s*free|helpline|email|ingredients|nutrition|nutritional|serving|energy|protein|carbohydrate|allergen|storage|directions|caution|warning|unit\s*sale\s*price|usp|barcode|rs\.?|₹|inr)\b/i.test(line)) {
+      return true;
+    }
+
+    // Pure numeric / price / quantity lines
+    if (/^(?:[₹$€£]|rs\.?|inr)?\s*[\d,.\-\/]+\s*(?:kg|g|gm|gms|ml|l|ltr|pcs)?$/i.test(line)) {
+      return true;
+    }
+
+    return false;
+  };
+
   const lines = text.split('\n')
     .map(l => l.trim())
-    .filter(l => l.length > 2)
-    // Filter out e-commerce UI chrome lines
-    .filter(l => !/^(blinkit|search|cart|home|deliver|mins|add|checkout|bill|order|total|save|discount|ratings?|reviews?)$/i.test(l));
+    .filter(l => !isNoiseOrChromeLine(l));
 
   if (lines.length > 0) {
     const name = lines[0];
@@ -362,16 +469,104 @@ export function extractProductNameAndBrand(text) {
 }
 
 /**
+ * Resolves normalized bounding box (percentages 0-100) for a detected declaration
+ * by finding matching OCR line(s) and computing their union bounding box.
+ * @param {Array<Object>} lines - Array of Tesseract line objects with { text, bbox: {x0, y0, x1, y1} }
+ * @param {RegExp|Function|string} matcher - Match condition for the line(s)
+ * @param {{ width: number, height: number }} dimensions - OCR canvas dimensions in pixels
+ * @param {Object} [options={}] - Options (e.g. multiLine: boolean, padX: number, padY: number)
+ * @returns {Object|null} Normalized bounding box or null if no reliable match
+ */
+export function resolveFieldBoundingBox(lines, matcher, dimensions, options = {}) {
+  if (!lines || !Array.isArray(lines) || lines.length === 0) return null;
+  const { width = 0, height = 0 } = dimensions || {};
+  if (width <= 0 || height <= 0) return null;
+
+  const { multiLine = false, padX = 0.5, padY = 0.5 } = options;
+
+  const matchedLines = [];
+
+  for (const line of lines) {
+    if (!line || !line.bbox || typeof line.text !== 'string') continue;
+    const lineText = line.text.trim();
+    if (!lineText) continue;
+
+    let isMatch = false;
+    if (typeof matcher === 'function') {
+      isMatch = matcher(lineText, line);
+    } else if (matcher instanceof RegExp) {
+      isMatch = matcher.test(lineText);
+    } else if (typeof matcher === 'string' && matcher.trim()) {
+      isMatch = lineText.toLowerCase().includes(matcher.toLowerCase());
+    }
+
+    if (isMatch) {
+      matchedLines.push(line);
+      if (!multiLine) break; // single line match is enough
+    }
+  }
+
+  if (matchedLines.length === 0) return null;
+
+  // Compute union bounding box across matched lines
+  let minX0 = Infinity;
+  let minY0 = Infinity;
+  let maxX1 = -Infinity;
+  let maxY1 = -Infinity;
+
+  for (const line of matchedLines) {
+    const { x0 = 0, y0 = 0, x1 = 0, y1 = 0 } = line.bbox || {};
+    if (x0 < minX0) minX0 = x0;
+    if (y0 < minY0) minY0 = y0;
+    if (x1 > maxX1) maxX1 = x1;
+    if (y1 > maxY1) maxY1 = y1;
+  }
+
+  if (minX0 >= maxX1 || minY0 >= maxY1) return null;
+
+  // Convert to normalized percentages (0-100%)
+  const rawX = (minX0 / width) * 100;
+  const rawY = (minY0 / height) * 100;
+  const rawWidth = ((maxX1 - minX0) / width) * 100;
+  const rawHeight = ((maxY1 - minY0) / height) * 100;
+
+  // Add small visual padding & clamp inside [0, 100]
+  const clampedX = Math.max(0, Math.round((rawX - padX) * 10) / 10);
+  const clampedY = Math.max(0, Math.round((rawY - padY) * 10) / 10);
+  const clampedWidth = Math.min(100 - clampedX, Math.round((rawWidth + 2 * padX) * 10) / 10);
+  const clampedHeight = Math.min(100 - clampedY, Math.round((rawHeight + 2 * padY) * 10) / 10);
+
+  if (clampedWidth <= 0 || clampedHeight <= 0) return null;
+
+  return {
+    x: clampedX,
+    y: clampedY,
+    width: clampedWidth,
+    height: clampedHeight,
+    isRealCoordinate: true,
+    matchedLineCount: matchedLines.length,
+    pixelBox: {
+      x0: minX0,
+      y0: minY0,
+      x1: maxX1,
+      y1: maxY1,
+    },
+  };
+}
+
+/**
  * Master parser for real user uploaded images.
  * STRICTLY NO HARDCODED DEMO FALLBACKS!
  * @param {string} rawText - Actual OCR text extracted from image
- * @param {Object} [imageMeta={}] - image metadata (imageId, imageType, etc.)
- * @returns {Object} Extracted fields object with source attribution
+ * @param {Object} [imageMeta={}] - image metadata (imageId, imageType, lines, dimensions, etc.)
+ * @returns {Object} Extracted fields object with source attribution and real bounding boxes
  */
 export function parseRealImageDeclarations(rawText, imageMeta = {}) {
   const text = rawText || '';
   const sourceImageId = imageMeta.imageId || 'IMG-01';
   const sourceImageType = imageMeta.imageType || 'Front Label';
+  const lines = imageMeta.lines || [];
+  const dimensions = imageMeta.dimensions || { width: 0, height: 0 };
 
   const mrpRes = extractMRP(text);
   const qtyRes = extractNetQuantity(text);
@@ -380,6 +575,132 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
   const careRes = extractConsumerCare(text);
   const countryRes = extractCountryOfOrigin(text);
   const nameRes = extractProductNameAndBrand(text);
+  const uspRes = extractUnitSalePrice(text);
+
+  // Match genuine OCR bounding boxes against lines
+  const mrpAmount = mrpRes.packageMRP ? mrpRes.packageMRP.replace(/[^0-9.]/g, '') : null;
+  const mrpBbox = mrpRes.packageMRP
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          const hasKeyword = /m\.?r\.?p|maximum\s*retail|incl.*taxes/i.test(lower);
+          const hasAmount = mrpAmount ? lower.includes(mrpAmount) : false;
+          return hasKeyword || hasAmount;
+        },
+        dimensions
+      )
+    : null;
+
+  const qtyBbox = qtyRes.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          const qVal = (qtyRes.value || '').toLowerCase();
+          return lower.includes(qVal) || /net\s*(?:qty|quantity|wt|weight|vol|volume)/i.test(lower);
+        },
+        dimensions
+      )
+    : null;
+
+  const nameBbox = nameRes.productName.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          const pName = (nameRes.productName.value || '').toLowerCase();
+          return lower === pName || (pName.length > 5 && lower.includes(pName.slice(0, 10)));
+        },
+        dimensions
+      )
+    : null;
+
+  const mfgBbox = mfgRes.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          return (
+            /mfd\.?\s*by|manufactured|marketed|packed\s*by|imported\s*by|packer/i.test(lower) ||
+            (mfgRes.value && lower.includes(mfgRes.value.slice(0, 15).toLowerCase()))
+          );
+        },
+        dimensions,
+        { multiLine: true }
+      )
+    : null;
+
+  const mfgDateBbox = datesRes.manufactureDate.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          return (
+            /(?:mfg|mfd|packed|packing|pkd|pkg|date\s*of\s*(?:manufacture|packing|pkg))/i.test(lower) &&
+            lower.includes(datesRes.manufactureDate.value.toLowerCase())
+          );
+        },
+        dimensions
+      )
+    : null;
+
+  const expDateBbox = datesRes.expiryDate.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          return (
+            /exp|expiry|best\s*before|use\s*by|bb/i.test(lower) &&
+            lower.includes(datesRes.expiryDate.value.toLowerCase())
+          );
+        },
+        dimensions
+      )
+    : null;
+
+  const careBbox = careRes.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          return (
+            /consumer|customer|helpline|care|feedback|toll\s*free|email/i.test(lower) ||
+            lower.includes(careRes.value.toLowerCase())
+          );
+        },
+        dimensions,
+        { multiLine: true }
+      )
+    : null;
+
+  const countryBbox = countryRes.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          return (
+            /country\s*of\s*origin|made\s*in|product\s*of/i.test(lower) &&
+            lower.includes(countryRes.value.toLowerCase())
+          );
+        },
+        dimensions
+      )
+    : null;
+
+  const uspBbox = uspRes.value
+    ? resolveFieldBoundingBox(
+        lines,
+        (l) => {
+          const lower = l.toLowerCase();
+          return (
+            /unit\s*sale\s*price|u\.?s\.?p|(?:per|\/)\s*(?:100\s*g|100\s*ml|kg|g|ml|l|unit|pc)/i.test(lower) ||
+            lower.includes(uspRes.value.toLowerCase())
+          );
+        },
+        dimensions
+      )
+    : null;
 
   // MRP field formatting & remarks
   let mrpField = {
@@ -387,7 +708,10 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
     originalValue: mrpRes.originalValue || null,
     confidence: 0,
     status: 'NOT_DETECTED',
+    onlineSellingPrice: mrpRes.onlineSellingPrice || null,
     remarks: mrpRes.remarks,
+    boundingBox: null,
+    imageRegion: null,
     sourceImageId,
     sourceImageType,
   };
@@ -397,9 +721,12 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
       value: mrpRes.packageMRP,
       originalValue: mrpRes.originalValue,
       confidence: mrpRes.confidence,
+      ...(mrpRes.isAmbiguous ? { status: 'NEEDS_REVIEW', manualVerificationRequired: true } : {}),
       onlineSellingPrice: mrpRes.onlineSellingPrice || null,
       remarks: mrpRes.remarks,
       uncertainCorrection: mrpRes.uncertainCorrection,
+      boundingBox: mrpBbox,
+      imageRegion: mrpBbox,
       sourceImageId,
       sourceImageType,
     };
@@ -411,6 +738,8 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
       status: 'NEEDS_REVIEW',
       remarks: mrpRes.remarks,
       manualVerificationRequired: true,
+      boundingBox: null,
+      imageRegion: null,
       sourceImageId,
       sourceImageType,
     };
@@ -423,6 +752,8 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
     confidence: 0,
     status: 'NOT_DETECTED',
     remarks: 'Net Quantity not detected in provided image',
+    boundingBox: null,
+    imageRegion: null,
     sourceImageId,
     sourceImageType,
   };
@@ -433,6 +764,8 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
       originalValue: qtyRes.originalValue,
       confidence: qtyRes.confidence,
       remarks: 'Extracted from label',
+      boundingBox: qtyBbox,
+      imageRegion: qtyBbox,
       sourceImageId,
       sourceImageType,
     };
@@ -440,24 +773,135 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
 
   return {
     rawOCRText: text,
-    productName: { ...nameRes.productName, sourceImageId, sourceImageType },
-    brand: { ...nameRes.brand, sourceImageId, sourceImageType },
+    productName: {
+      ...nameRes.productName,
+      boundingBox: nameBbox,
+      imageRegion: nameBbox,
+      sourceImageId,
+      sourceImageType,
+    },
+    brand: {
+      ...nameRes.brand,
+      boundingBox: nameBbox,
+      imageRegion: nameBbox,
+      sourceImageId,
+      sourceImageType,
+    },
     netQuantity: qtyField,
     mrp: mrpField,
-    manufacturer: mfgRes.value 
-      ? { ...mfgRes, sourceImageId, sourceImageType } 
-      : { value: null, originalValue: null, confidence: 0, status: 'NOT_DETECTED', remarks: 'Manufacturer not detected in provided image', sourceImageId, sourceImageType },
+    manufacturer: mfgRes.value
+      ? {
+          ...mfgRes,
+          boundingBox: mfgBbox,
+          imageRegion: mfgBbox,
+          sourceImageId,
+          sourceImageType,
+        }
+      : {
+          value: null,
+          originalValue: null,
+          confidence: 0,
+          status: 'NOT_DETECTED',
+          remarks: 'Manufacturer not detected in provided image',
+          boundingBox: null,
+          imageRegion: null,
+          sourceImageId,
+          sourceImageType,
+        },
     manufactureDate: datesRes.manufactureDate.value
-      ? { ...datesRes.manufactureDate, sourceImageId, sourceImageType }
-      : { value: null, originalValue: null, confidence: 0, status: 'NOT_DETECTED', remarks: 'Manufacturing date not detected', sourceImageId, sourceImageType },
+      ? {
+          ...datesRes.manufactureDate,
+          boundingBox: mfgDateBbox,
+          imageRegion: mfgDateBbox,
+          sourceImageId,
+          sourceImageType,
+        }
+      : {
+          value: null,
+          originalValue: null,
+          confidence: 0,
+          status: 'NOT_DETECTED',
+          remarks: 'Manufacturing date not detected',
+          boundingBox: null,
+          imageRegion: null,
+          sourceImageId,
+          sourceImageType,
+        },
     expiryDate: datesRes.expiryDate.value
-      ? { ...datesRes.expiryDate, sourceImageId, sourceImageType }
-      : { value: null, originalValue: null, confidence: 0, status: 'NOT_DETECTED', remarks: 'Expiry date not detected', sourceImageId, sourceImageType },
+      ? {
+          ...datesRes.expiryDate,
+          boundingBox: expDateBbox,
+          imageRegion: expDateBbox,
+          sourceImageId,
+          sourceImageType,
+        }
+      : {
+          value: null,
+          originalValue: null,
+          confidence: 0,
+          status: 'NOT_DETECTED',
+          remarks: 'Expiry date not detected',
+          boundingBox: null,
+          imageRegion: null,
+          sourceImageId,
+          sourceImageType,
+        },
     consumerCare: careRes.value
-      ? { ...careRes, sourceImageId, sourceImageType }
-      : { value: null, originalValue: null, confidence: 0, status: 'NOT_DETECTED', remarks: 'Consumer care not detected', sourceImageId, sourceImageType },
+      ? {
+          ...careRes,
+          boundingBox: careBbox,
+          imageRegion: careBbox,
+          sourceImageId,
+          sourceImageType,
+        }
+      : {
+          value: null,
+          originalValue: null,
+          confidence: 0,
+          status: 'NOT_DETECTED',
+          remarks: 'Consumer care not detected',
+          boundingBox: null,
+          imageRegion: null,
+          sourceImageId,
+          sourceImageType,
+        },
     countryOfOrigin: countryRes.value
-      ? { ...countryRes, sourceImageId, sourceImageType }
-      : { value: null, originalValue: null, confidence: 0, status: 'NOT_DETECTED', remarks: 'Country of origin not detected', sourceImageId, sourceImageType },
+      ? {
+          ...countryRes,
+          boundingBox: countryBbox,
+          imageRegion: countryBbox,
+          sourceImageId,
+          sourceImageType,
+        }
+      : {
+          value: null,
+          originalValue: null,
+          confidence: 0,
+          status: 'NOT_DETECTED',
+          remarks: 'Country of origin not detected',
+          boundingBox: null,
+          imageRegion: null,
+          sourceImageId,
+          sourceImageType,
+        },
+    unitSalePrice: uspRes.value
+      ? {
+          ...uspRes,
+          boundingBox: uspBbox,
+          imageRegion: uspBbox,
+          sourceImageId,
+          sourceImageType,
+        }
+      : {
+          value: null,
+          originalValue: null,
+          confidence: 0,
+          status: 'NOT_DETECTED',
+          remarks: 'Unit Sale Price not detected',
+          boundingBox: null,
+          imageRegion: null,
+          sourceImageId,
+          sourceImageType,
+        },
   };
 }

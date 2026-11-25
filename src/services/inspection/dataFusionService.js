@@ -48,9 +48,30 @@ export function normalizeForEquivalence(val) {
     }
   }
 
-  // 3. Fallback string normalization: alphanumeric only, collapsed whitespace
+  // 3. Date normalization (e.g. "08/2026" == "08-2026" == "08.2026")
+  const dateMatch = str.match(/^(\d{1,2})[\/.\-](\d{2,4})(?:[\/.\-](\d{2,4}))?$/);
+  if (dateMatch) {
+    if (dateMatch[3]) {
+      return `DATE_${dateMatch[1].padStart(2, '0')}_${dateMatch[2].padStart(2, '0')}_${dateMatch[3]}`;
+    }
+    return `DATE_${dateMatch[1].padStart(2, '0')}_${dateMatch[2]}`;
+  }
+
+  // 4. Fallback string normalization: alphanumeric only, collapsed whitespace
   return str.replace(/[^a-z0-9]/g, '');
 }
+
+// Statutory quantitative/factual fields that must remain consistent across Front & Back labels.
+// Descriptive fields (productName, brand, manufacturer, consumerCare) naturally vary between Front & Back
+// panels and are merged by source priority rather than triggering false conflict alerts.
+const CONFLICT_CHECK_FIELDS = new Set([
+  'mrp',
+  'netQuantity',
+  'countryOfOrigin',
+  'manufactureDate',
+  'expiryDate',
+  'unitSalePrice',
+]);
 
 /**
  * Merges extracted data across multiple label images and checks for conflicts
@@ -69,6 +90,7 @@ export function fuseMultiImageScan(labelScanResults = []) {
   const unifiedData = {};
   const conflicts = [];
   const fieldSources = {};
+  const notDetectedMetadata = {};
 
   // Collate all values per field across images
   labelScanResults.forEach((scan) => {
@@ -79,7 +101,20 @@ export function fuseMultiImageScan(labelScanResults = []) {
     Object.entries(fields).forEach(([key, fieldVal]) => {
       if (key === 'rawOCRText') return;
       const valText = typeof fieldVal === 'object' ? fieldVal?.value : fieldVal;
-      if (!valText) return; // Do not treat missing/not-detected fields as conflicts
+      if (!valText) {
+        if (typeof fieldVal === 'object' && fieldVal !== null) {
+          const prev = notDetectedMetadata[key];
+          // Prefer keeping metadata that carries actionable details (e.g., onlineSellingPrice or manual review)
+          if (!prev || (!prev.onlineSellingPrice && fieldVal.onlineSellingPrice) || (!prev.manualVerificationRequired && fieldVal.manualVerificationRequired)) {
+            notDetectedMetadata[key] = {
+              ...fieldVal,
+              sourceImageId: imageId,
+              sourceImageType: imageLabel,
+            };
+          }
+        }
+        return; // Do not treat missing/not-detected fields as conflicts
+      }
 
       if (!fieldSources[key]) {
         fieldSources[key] = [];
@@ -100,7 +135,41 @@ export function fuseMultiImageScan(labelScanResults = []) {
   Object.entries(fieldSources).forEach(([key, occurrences]) => {
     if (occurrences.length === 0) return;
 
-    // Check if distinct NON-EQUIVALENT values exist across images
+    // Descriptive fields (Product Name, Brand, Manufacturer, Consumer Care) differ naturally
+    // between Front and Back packaging; merge by label role priority instead of raising conflict errors.
+    if (!CONFLICT_CHECK_FIELDS.has(key)) {
+      const sorted = [...occurrences].sort((a, b) => {
+        if (key === 'productName' || key === 'brand') {
+          const aFront = /front/i.test(a.imageLabel) ? 1 : 0;
+          const bFront = /front/i.test(b.imageLabel) ? 1 : 0;
+          if (aFront !== bFront) return bFront - aFront;
+        } else if (key === 'manufacturer' || key === 'consumerCare') {
+          const aBack = /back|side/i.test(a.imageLabel) ? 1 : 0;
+          const bBack = /back|side/i.test(b.imageLabel) ? 1 : 0;
+          if (aBack !== bBack) return bBack - aBack;
+          // Prefer fuller detailed address/contact text when confidence is tied
+          if (Math.abs(b.confidence - a.confidence) < 0.05) {
+            return String(b.value).length - String(a.value).length;
+          }
+        }
+        return b.confidence - a.confidence;
+      });
+
+      const primary = sorted[0];
+      unifiedData[key] = {
+        ...primary.rawField,
+        value: primary.value,
+        originalValue: primary.originalValue,
+        confidence: primary.confidence,
+        conflictDetected: false,
+        sources: occurrences,
+        sourceImageId: primary.imageId,
+        sourceImageType: primary.imageLabel,
+      };
+      return;
+    }
+
+    // Check if distinct NON-EQUIVALENT statutory values exist across images
     const uniqueTokens = new Set(occurrences.map(o => normalizeForEquivalence(o.value)));
 
     if (uniqueTokens.size > 1) {
@@ -141,6 +210,13 @@ export function fuseMultiImageScan(labelScanResults = []) {
         sourceImageId: primary.imageId,
         sourceImageType: primary.imageLabel,
       };
+    }
+  });
+
+  // Preserve helpful metadata (like onlineSellingPrice or manualVerificationRequired) for undetected fields
+  Object.entries(notDetectedMetadata).forEach(([key, meta]) => {
+    if (!unifiedData[key]) {
+      unifiedData[key] = meta;
     }
   });
 

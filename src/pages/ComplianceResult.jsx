@@ -17,6 +17,31 @@ import { format } from 'date-fns';
 import { useState } from 'react';
 import toast from 'react-hot-toast';
 
+/**
+ * Safely extracts a renderable display string from declaration values,
+ * supporting legacy string values, structured OCR objects ({ value, confidence }),
+ * null, undefined, empty strings, and missing fields.
+ */
+export function getDisplayValue(field, fallback = '—') {
+  if (field === null || field === undefined) return fallback;
+
+  if (typeof field === 'object') {
+    if (field.value !== null && field.value !== undefined && String(field.value).trim() !== '') {
+      return String(field.value).trim();
+    }
+    if (field.normalizedValue !== null && field.normalizedValue !== undefined && String(field.normalizedValue).trim() !== '') {
+      return String(field.normalizedValue).trim();
+    }
+    if (field.originalValue !== null && field.originalValue !== undefined && String(field.originalValue).trim() !== '') {
+      return String(field.originalValue).trim();
+    }
+    return fallback;
+  }
+
+  const str = String(field).trim();
+  return str !== '' ? str : fallback;
+}
+
 export default function ComplianceResult() {
   const { id } = useParams();
   const location = useLocation();
@@ -54,26 +79,64 @@ export default function ComplianceResult() {
     : (dbAssessment?.overallStatus || scan?.overallStatus);
 
   const categoryId = isNewScan ? stateData.categoryId : (dbScan?.category || 'GENERAL_PREPACKED');
+  const categoryDisplay = typeof categoryId === 'object' && categoryId !== null
+    ? (categoryId.name || categoryId.id || 'GENERAL_PREPACKED')
+    : (categoryId || 'GENERAL_PREPACKED');
   const imageUrl = isNewScan ? stateData.imageUrl : (dbScan?.images?.[0] || product?.image);
   const audit = complianceAssessment || {};
   const issues = complianceAssessment?.issues || { critical: [], warning: [], review: [] };
+  const assessmentSummary = complianceAssessment?.summary || { pass: 0, fail: 0, review: 0, total: 0 };
 
   // Calculate Evidence Coverage metric
   const coverage = calculateEvidenceCoverage(complianceResults);
 
-  // Prepare visual evidence list for modal viewer
-  const mappedEvidenceList = (complianceResults || []).map((res, index) => ({
-    requirementName: res.requirementName || res.ruleName || res.requirement,
-    extractedValue: res.extractedValue || res.value,
-    normalizedValue: res.normalizedValue,
-    confidence: res.confidence || 0.95,
-    sourceLabel: res.sourceLabel || 'Front Label',
-    imageUrl: imageUrl,
-    boundingBox: res.boundingBox || { x: 15 + (index * 8) % 60, y: 15 + (index * 12) % 65, width: 45, height: 12 },
-    status: res.status,
-    ruleReference: res.ruleReference || 'LM (PC) Rules, 2011',
-    reason: res.reason || res.remarks || 'Visual evidence extracted from label image',
-  }));
+  // Available label images from navigation state or DB scan
+  const availableImages = isNewScan ? (stateData?.labelImages || []) : (dbScan?.images || []);
+
+  // Prepare visual evidence list for modal viewer using genuine coordinates only
+  const mappedEvidenceList = (complianceResults || []).map((res) => {
+    // Lookup field in extractedData or DB evidence by res.dataKey / ruleId
+    const fieldKey = res.dataKey || res.requirementId || res.fieldKey || '';
+    const fieldData = extractedData?.[fieldKey] || (Array.isArray(dbEvidence) ? dbEvidence.find(e => e.field === fieldKey) : null) || null;
+
+    // Determine accurate bounding box from check evidence or extractedData field
+    const realBox = res.evidence?.boundingBox ||
+      res.evidence?.imageRegion ||
+      res.boundingBox ||
+      fieldData?.evidence?.boundingBox ||
+      fieldData?.imageRegion ||
+      fieldData?.boundingBox ||
+      null;
+
+    // Resolve matching image URL for Front / Back label
+    let itemImageUrl = res.evidence?.imageUrl || res.imageUrl || fieldData?.evidence?.imageUrl;
+    if (!itemImageUrl && availableImages.length > 0) {
+      const targetId = res.evidence?.imageId || res.sourceImageId || fieldData?.evidence?.imageId || fieldData?.sourceImageId;
+      const targetType = res.evidence?.imageType || res.sourceImageType || fieldData?.evidence?.imageType || fieldData?.sourceImageType;
+      const matched = availableImages.find(img => (targetId && img.imageId === targetId) || (targetType && img.imageType === targetType));
+      itemImageUrl = matched?.url || matched?.preview || (typeof matched === 'string' ? matched : null);
+    }
+    if (!itemImageUrl) {
+      itemImageUrl = imageUrl;
+    }
+
+    const sourceLabel = res.evidence?.sourceLabel || res.evidence?.imageType || fieldData?.evidence?.sourceLabel || res.sourceLabel || 'Product Label';
+
+    return {
+      requirementName: getDisplayValue(res.requirementName || res.ruleName || res.requirement, 'Requirement Check'),
+      extractedValue: getDisplayValue(res.extractedValue ?? res.value, 'Not Detected'),
+      normalizedValue: getDisplayValue(res.normalizedValue, '—'),
+      confidence: typeof res.confidence === 'number' ? res.confidence : 0.95,
+      sourceLabel: typeof sourceLabel === 'string' ? sourceLabel : 'Product Label',
+      imageUrl: itemImageUrl,
+      boundingBox: realBox, // null if no genuine coordinates exist
+      status: res.status,
+      ruleReference: typeof res.ruleReference === 'string' ? res.ruleReference : 'LM (PC) Rules, 2011',
+      reason: typeof (res.reason || res.remarks) === 'string'
+        ? (res.reason || res.remarks)
+        : (realBox ? 'Visual evidence verified from label image' : 'Visual evidence coordinates unavailable'),
+    };
+  });
 
   const handleOpenEvidence = (index = 0) => {
     setSelectedEvidenceIndex(index);
@@ -89,7 +152,7 @@ export default function ComplianceResult() {
         complianceResults,
         summary: complianceAssessment?.summary,
         overallStatus,
-        category: { id: categoryId, name: categoryId },
+        category: { id: categoryDisplay, name: categoryDisplay },
         audit,
       });
 
@@ -109,7 +172,11 @@ export default function ComplianceResult() {
     }
   };
 
-  const productName = extractedData?.productName?.value || extractedData?.productName || product?.productName || scan?.productName || 'Prepacked Commodity';
+  const productName =
+    getDisplayValue(extractedData?.productName, '') ||
+    getDisplayValue(product?.productName, '') ||
+    getDisplayValue(scan?.productName, '') ||
+    'Prepacked Commodity';
   const scanDate = scan?.createdAt || scan?.scanDate ? format(new Date(scan?.createdAt || scan?.scanDate), 'dd MMM yyyy, HH:mm') : format(new Date(), 'dd MMM yyyy, HH:mm');
 
   return (
@@ -168,16 +235,16 @@ export default function ComplianceResult() {
             <div className="flex items-start justify-between gap-3 flex-wrap">
               <div>
                 <h2 className="text-lg font-bold text-navy">{productName}</h2>
-                {categoryId && (
+                {categoryDisplay && (
                   <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 mt-1 rounded-md text-xs font-semibold bg-teal-50 text-teal-800 border border-teal-200">
                     <Layers className="w-3 h-3 text-teal-600" />
-                    Commodity Category: {categoryId}
+                    Commodity Category: {categoryDisplay}
                   </div>
                 )}
                 <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-sm text-gray-500">
-                  <span>Net Qty: <strong className="text-navy">{extractedData?.netQuantity?.value || extractedData?.netQuantity || '—'}</strong></span>
-                  <span>MRP: <strong className="text-navy">{extractedData?.mrp?.value || extractedData?.mrp || '—'}</strong></span>
-                  <span>Mfg/Import: <strong className="text-navy">{extractedData?.manufactureDate?.value || extractedData?.manufactureDate || '—'}</strong></span>
+                  <span>Net Qty: <strong className="text-navy">{getDisplayValue(extractedData?.netQuantity)}</strong></span>
+                  <span>MRP: <strong className="text-navy">{getDisplayValue(extractedData?.mrp)}</strong></span>
+                  <span>Mfg/Import: <strong className="text-navy">{getDisplayValue(extractedData?.manufactureDate)}</strong></span>
                 </div>
               </div>
               <StatusBadge status={overallStatus || 'NEEDS_REVIEW'} size="lg" />
@@ -216,7 +283,7 @@ export default function ComplianceResult() {
       </div>
 
       {/* Overall Screening Card */}
-      <OverallStatusCard status={overallStatus || 'NEEDS_REVIEW'} summary={complianceAssessment?.summary} />
+      <OverallStatusCard status={overallStatus || 'NEEDS_REVIEW'} summary={assessmentSummary} />
 
       {/* Compliance Checklist Table with "View Evidence" Buttons */}
       <div className="card">
@@ -260,8 +327,10 @@ export default function ComplianceResult() {
                       </span>
                     </td>
                     <td>
-                      {result.extractedValue || result.value ? (
-                        <span className="text-navy font-mono text-[11px] font-bold">{result.extractedValue || result.value}</span>
+                      {getDisplayValue(result.extractedValue ?? result.value, '') ? (
+                        <span className="text-navy font-mono text-[11px] font-bold">
+                          {getDisplayValue(result.extractedValue ?? result.value)}
+                        </span>
                       ) : (
                         <span className="text-amber-700 italic text-[11px]">Not detected</span>
                       )}
