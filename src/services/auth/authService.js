@@ -57,21 +57,23 @@ export function getCurrentUser() {
 /**
  * Authenticate user by email & password or demo credentials
  */
-export async function loginUser(email, password, rememberMe = true) {
+export async function loginUser(email, password, rememberMe = true, roleOverride = null) {
   if (!email || !password) throw new Error('Please provide email and password');
   if (password.length < 6) throw new Error('Password must be at least 6 characters');
 
-  // Match demo user or create Inspector session
+  // Match demo user or create session with role
   const cleanEmail = email.trim().toLowerCase();
   const matchedDemo = DEMO_USERS.find(u => u.email.toLowerCase() === cleanEmail);
 
-  const user = matchedDemo || {
+  const role = roleOverride || (matchedDemo ? matchedDemo.role : ROLES.INSPECTOR);
+
+  const user = matchedDemo ? { ...matchedDemo, ...(roleOverride ? { role: roleOverride } : {}) } : {
     uid: `USR-${Date.now()}`,
     email: cleanEmail,
     displayName: cleanEmail.split('@')[0].replace('.', ' '),
-    role: ROLES.INSPECTOR,
-    designation: 'Legal Metrology Inspector',
-    organization: 'Legal Metrology Inspection Division',
+    role: role,
+    designation: role === ROLES.ADMIN ? 'System Administrator' : role === ROLES.SUPERVISOR ? 'Senior Enforcement Officer' : 'Legal Metrology Inspector',
+    organization: role === ROLES.ADMIN ? 'National Informatics & Compliance Hub' : role === ROLES.SUPERVISOR ? 'Legal Metrology Enforcement Division' : 'Legal Metrology Inspection Division',
     badgeNumber: `LMI-${Math.floor(Math.random() * 9000 + 1000)}`,
   };
 

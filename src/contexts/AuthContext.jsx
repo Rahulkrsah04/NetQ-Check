@@ -16,11 +16,28 @@ export function AuthProvider({ children }) {
     setLoading(false);
   }, []);
 
-  const login = async (email, password, remember = true) => {
-    const authenticated = await loginUser(email, password, remember);
+  const login = async (email, password, remember = true, roleOverride = null) => {
+    const authenticated = await loginUser(email, password, remember, roleOverride);
     setUser(authenticated);
     recordAuditLog('LOGIN', 'USER', authenticated.uid, { email: authenticated.email, role: authenticated.role }, authenticated);
     return authenticated;
+  };
+
+  const register = async (email, password, name, role = ROLES.INSPECTOR) => {
+    const cleanEmail = email.trim().toLowerCase();
+    const newUser = {
+      uid: `USR-${Date.now()}`,
+      email: cleanEmail,
+      displayName: name || cleanEmail.split('@')[0],
+      role: role || ROLES.INSPECTOR,
+      designation: role === ROLES.ADMIN ? 'System Administrator' : role === ROLES.SUPERVISOR ? 'Senior Enforcement Officer' : 'Legal Metrology Inspector',
+      organization: 'Legal Metrology Department',
+      badgeNumber: `REG-${Math.floor(Math.random() * 9000 + 1000)}`,
+    };
+    setUser(newUser);
+    localStorage.setItem('netq_auth_user_v4', JSON.stringify(newUser));
+    recordAuditLog('REGISTER', 'USER', newUser.uid, { email: newUser.email, role: newUser.role }, newUser);
+    return newUser;
   };
 
   const switchRole = (newRole) => {
@@ -47,6 +64,7 @@ export function AuthProvider({ children }) {
         user,
         loading,
         login,
+        register,
         logout,
         switchRole,
         checkRole,

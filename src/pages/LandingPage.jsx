@@ -69,9 +69,9 @@ export default function LandingPage() {
                 Legal Metrology Compliance System
               </div>
 
-              <h1 className="text-4xl md:text-5xl font-extrabold leading-tight mb-4">
+              <h1 className="text-4xl md:text-5xl font-extrabold leading-tight mb-4 text-white">
                 Scan.{' '}
-                <span className="text-primary">Verify.</span>{' '}
+                <span className="text-teal-400">Verify.</span>{' '}
                 Comply.
               </h1>
 
