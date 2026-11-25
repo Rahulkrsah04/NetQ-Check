@@ -1,13 +1,13 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Camera, History, FileText, ShieldCheck,
-  Package, Settings, LogOut, X, ScrollText, UserCheck
+  Package, Settings, LogOut, X, ScrollText
 } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import Logo from '../ui/Logo';
 
 export default function Sidebar({ mobileOpen = false, onClose = () => {} }) {
-  const { user, logout, switchRole, checkRole, ROLES } = useAuth();
+  const { user, logout, checkRole, ROLES } = useAuth();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -56,26 +56,6 @@ export default function Sidebar({ mobileOpen = false, onClose = () => {} }) {
             <X className="w-5 h-5" />
           </button>
         </div>
-
-        {/* Role Badge Banner */}
-        {user && (
-          <div className="px-4 py-2 bg-white/5 border-b border-white/10 flex items-center justify-between">
-            <span className="text-[11px] font-semibold text-white/70 flex items-center gap-1.5">
-              <UserCheck className="w-3.5 h-3.5 text-teal-400" />
-              Role: <span className="text-teal-300 font-bold">{user.role}</span>
-            </span>
-            <select
-              value={user.role}
-              onChange={(e) => switchRole(e.target.value)}
-              className="bg-navy border border-white/20 text-white/80 text-[10px] rounded px-1.5 py-0.5 focus:outline-none focus:border-teal-400"
-              title="Switch role for testing"
-            >
-              <option value={ROLES.INSPECTOR}>INSPECTOR</option>
-              <option value={ROLES.SUPERVISOR}>SUPERVISOR</option>
-              <option value={ROLES.ADMIN}>ADMIN</option>
-            </select>
-          </div>
-        )}
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
