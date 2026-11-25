@@ -95,7 +95,7 @@ function DashboardTopbar({ onOpenMobile }) {
   };
 
   return (
-    <header className="h-16 bg-white border-b border-border px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30">
+    <header className="h-16 bg-white border-b border-border px-4 sm:px-6 flex items-center justify-between sticky top-0 z-40">
       <div className="flex items-center gap-3">
         {/* Mobile: Hamburger toggle */}
         <button
