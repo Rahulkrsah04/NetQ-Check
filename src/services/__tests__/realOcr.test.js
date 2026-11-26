@@ -264,6 +264,16 @@ export async function runRealOcrTestSuite() {
   const normPinAddr = normalizeAddress('Tata Consumer Products Ltd, Kolkata - 700 071');
   assert(normPinAddr.pinCode === '700071' && validateAddress(normPinAddr.rawValue, normPinAddr).isWarning !== true, 'normalizeAddress and validateAddress accept spaced Indian PIN codes (700 071)');
 
+  // [17] Empty / Non-Product Camera Noise Rejection (Prevent Fake / Hallucinated Detections)
+  console.log('\n[17] Test Case 17: Non-Product Camera Noise Rejection (Wall/Empty/Random Capture)');
+  const cameraNoiseText = 'Sera ANE TAN Sm Ya ee\n20 g';
+  const parsedNoise = parseRealImageDeclarations(cameraNoiseText, { imageId: 'IMG-NOISE-1', imageType: 'Front Label' });
+  assert(parsedNoise.isGenuineProduct === false, 'Flags image with no packaging indicators as isGenuineProduct === false');
+  assert(parsedNoise.productName.value === null, 'Does NOT hallucinate product name from camera noise ("Sera ANE TAN Sm Ya ee")');
+  assert(parsedNoise.productName.status === 'NOT_DETECTED', 'Product name status is NOT_DETECTED');
+  assert(parsedNoise.netQuantity.value === null, 'Does NOT hallucinate net quantity ("20 g") from empty scene noise');
+  assert(parsedNoise.mrp.value === null, 'MRP remains NOT_DETECTED for scene noise');
+
   console.log('\n============================================================');
   console.log(` Test Execution Complete: ${passed} Passed, ${failed} Failed`);
   console.log('============================================================\n');

@@ -414,6 +414,14 @@ export default function ScanProduct() {
     });
   };
 
+  const activeFusedData = fusionResult?.unifiedData || ocrResult?.extractedData || {};
+  const hasGenuineDeclarations = Object.entries(activeFusedData).some(([k, v]) =>
+    ['productName', 'mrp', 'netQuantity', 'manufacturer'].includes(k) &&
+    v?.value &&
+    v?.confidence >= 0.70 &&
+    v?.status !== 'NOT_DETECTED'
+  );
+
   return (
     <div className="max-w-4xl animate-fade-in space-y-6">
       {/* Header */}
@@ -614,15 +622,20 @@ export default function ScanProduct() {
             </div>
           )}
 
-          {/* SPARSE / NO OCR TEXT ADVISORY */}
-          {!combinedRawText.trim() && !labelImages.some(img => img.isDemoPreset) && (
-            <div className="card bg-amber-50 border border-amber-200 p-4">
+          {/* NO GENUINE PRODUCT DETECTED ALERT BANNER */}
+          {!hasGenuineDeclarations && !labelImages.some(img => img.isDemoPreset) && (
+            <div className="card bg-amber-50 border-2 border-amber-300 p-4 shadow-sm">
               <div className="flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-                <div className="text-xs text-amber-900">
-                  <div className="font-bold">Limited text recognized from uploaded photo</div>
-                  <p className="mt-0.5 opacity-90">
-                    The photo may be blurred, angled, or low-contrast. You can enter or correct product declarations below and still generate your compliance screening results.
+                <AlertTriangle className="w-6 h-6 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <h3 className="text-sm font-bold text-amber-950 flex items-center gap-2">
+                    No Genuine Packaged Commodity Declarations Detected
+                  </h3>
+                  <p className="text-xs text-amber-900 mt-1">
+                    The camera snapshot does not appear to contain a readable packaged product or statutory declarations (such as MRP, Net Quantity, Brand Name, or Manufacturer).
+                  </p>
+                  <p className="text-xs text-slate-700 mt-1.5 font-semibold">
+                    👉 <strong>Action Required:</strong> Point the camera directly at a real product packet (such as Tata Salt, Soap, Oil, Rice) with clear lighting, or enter the values manually below.
                   </p>
                 </div>
               </div>
@@ -739,17 +752,17 @@ export default function ScanProduct() {
                         <span className="text-xs text-red-600 font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3 h-3" /> Conflict
                         </span>
-                      ) : needsManualReview ? (
+                      ) : !displayVal || conf === 0 ? (
+                        <span className="text-xs text-slate-500 font-bold flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3 text-slate-400" /> Not Detected
+                        </span>
+                      ) : needsManualReview || conf < 0.75 ? (
                         <span className="text-xs text-amber-700 font-bold flex items-center gap-1">
                           <AlertCircle className="w-3 h-3" /> Needs Review ({Math.round(conf * 100)}%)
                         </span>
-                      ) : conf > 0 ? (
+                      ) : (
                         <span className="text-xs text-success flex items-center gap-1">
                           <CheckCircle className="w-3 h-3" /> Verified ({Math.round(conf * 100)}%)
-                        </span>
-                      ) : (
-                        <span className="text-xs text-amber-700 font-bold flex items-center gap-1">
-                          <AlertCircle className="w-3 h-3" /> Not Detected
                         </span>
                       )}
                     </div>

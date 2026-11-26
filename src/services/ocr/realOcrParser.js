@@ -251,29 +251,34 @@ export function extractNetQuantity(text) {
   const standaloneQtyGlobalRegex = new RegExp(`\\b(\\d+(?:\\.\\d+)?)\\s*${unitPattern}\\b`, 'gi');
   const nutritionOrRateRegex = /\b(?:(?:per|por|p[eo]r)\s*100|(?:per|por|p[eo]r)\s*s[eo]rve|servings?|pack\s*:\s*\d+|energy|protein|carbohydrate|carbs|sugar|added\s*sugars?|fat|total\s*fat|saturated|trans|cholesterol|fibre|fiber|sodium|iodine|lodine|iodate|potassium|calcium|iron|magnesium|zinc|vitamin|kcal|mcg|µg|rda|nutritional?|approx(?:imate)?|unit\s*sale\s*price|usp)\b|(?:per|por|\/)\s*(?:100\s*g|100\s*ml|kg|g|gm|ml|l)\b|\[\s*\d{1,3}\s*\]|\(\s*%\s*\)/i;
 
-  const lines = cleanedText.split('\n').map(l => l.trim()).filter(Boolean);
-  for (const line of lines) {
-    if (nutritionOrRateRegex.test(line)) continue;
+  // Standalone quantity numbers without 'Net Qty' prefix require packaging context so wall/desk noise is not falsely extracted
+  const hasPackagingContext = /\b(?:net\s*(?:qty|quantity|wt|weight|vol|volume|content)|m\.?\s*r\.?\s*p|maximum\s*retail|pkg|pack|packaging|mfg|best\s*before|use\s*by|fssai|salt|rice|oil|soap|sugar|atta|flour|tea|coffee|biscuit)\b/i.test(cleanedText);
 
-    // Skip lines listing multiple nutrient quantities (e.g. "0 g, Carbohydrate 0 g" or "38000 mg ... 2 mg")
-    const multiMatches = line.match(standaloneQtyGlobalRegex) || [];
-    if (multiMatches.length > 1) continue;
+  if (hasPackagingContext) {
+    const lines = cleanedText.split('\n').map(l => l.trim()).filter(Boolean);
+    for (const line of lines) {
+      if (nutritionOrRateRegex.test(line)) continue;
 
-    const match = line.match(standaloneQtyRegex);
-    if (match) {
-      const numericVal = parseFloat(match[1]);
-      if (isNaN(numericVal) || numericVal <= 0) continue; // Reject "0 g" / zero-value nutrition noise
+      // Skip lines listing multiple nutrient quantities (e.g. "0 g, Carbohydrate 0 g" or "38000 mg ... 2 mg")
+      const multiMatches = line.match(standaloneQtyGlobalRegex) || [];
+      if (multiMatches.length > 1) continue;
 
-      const unit = normalizeUnit(match[2]);
-      // Unlabeled "mg" is almost always micronutrient content (e.g. Sodium 38000 mg, Iodine 2 mg), never package net weight
-      if (unit === 'mg') continue;
+      const match = line.match(standaloneQtyRegex);
+      if (match) {
+        const numericVal = parseFloat(match[1]);
+        if (isNaN(numericVal) || numericVal <= 0) continue; // Reject "0 g" / zero-value nutrition noise
 
-      return {
-        value: `${match[1]} ${unit}`,
-        originalValue: match[0].trim(),
-        confidence: 0.95,
-        uncertainCorrection: false,
-      };
+        const unit = normalizeUnit(match[2]);
+        // Unlabeled "mg" is almost always micronutrient content (e.g. Sodium 38000 mg, Iodine 2 mg), never package net weight
+        if (unit === 'mg') continue;
+
+        return {
+          value: `${match[1]} ${unit}`,
+          originalValue: match[0].trim(),
+          confidence: 0.95,
+          uncertainCorrection: false,
+        };
+      }
     }
   }
 
@@ -575,6 +580,24 @@ export function extractProductNameAndBrand(text) {
     // Reject lines dominated by short fragments/noise (e.g. "v. ay AND . ps", "Lon -", "s ITE > red")
     if (noiseTokens >= validWords.length && validWords.length <= 2) return true;
     if (/^\d+\s+\d*\(/.test(line) || /\bservings?\b/i.test(line)) return true;
+
+    // Reject lines with multiple 1-2 letter fragments (e.g. "Sera ANE TAN Sm Ya ee") unless a commodity keyword is present
+    const commodityKeywordRegex = /\b(?:salt|oil|rice|atta|flour|butter|soap|cream|powder|biscuits|tea|coffee|milk|water|sugar|dal|masala|juice|shampoo|toothpaste|detergent|iodised|evaporated|refined|commodity)\b/i;
+    const shortLetterTokens = rawTokens.filter(t => t.replace(/[^a-zA-Z]/g, '').length <= 2);
+    if (shortLetterTokens.length >= 2 && !commodityKeywordRegex.test(line)) {
+      return true;
+    }
+    if (rawTokens.length > 2 && (shortLetterTokens.length / rawTokens.length) > 0.30 && !commodityKeywordRegex.test(line)) {
+      return true;
+    }
+    if (rawTokens.length >= 3) {
+      const t1 = rawTokens[rawTokens.length - 1].replace(/[^a-zA-Z]/g, '');
+      const t2 = rawTokens[rawTokens.length - 2].replace(/[^a-zA-Z]/g, '');
+      if (t1.length <= 2 && t2.length <= 2 && !commodityKeywordRegex.test(line)) {
+        return true;
+      }
+    }
+
     // Reject single-word lines that are just generic stopwords or short non-product tokens
     if (validWords.length === 1 && rawTokens.length === 1 && /^(?:and|the|for|with|from|made|only|this|that|less|more|high|scan|visit)$/i.test(validWords[0])) {
       return true;
@@ -755,6 +778,37 @@ export function resolveFieldBoundingBox(lines, matcher, dimensions, options = {}
 }
 
 /**
+ * Detects whether OCR text contains genuine packaged commodity indicators
+ * (statutory keywords, commodity terms, brand names, or decoded barcode/QR).
+ * Prevents hallucinating fake products from empty room/wall/face camera shots.
+ */
+export function isGenuineProductLabel(rawText, barcodes = []) {
+  if (barcodes && barcodes.some(b => b?.detected && b?.data)) {
+    return true;
+  }
+  if (!rawText || typeof rawText !== 'string') return false;
+  const text = rawText.trim();
+  if (text.length < 5) return false;
+
+  // 1. Statutory packaging declarations
+  const statutoryRegex = /\b(?:m\.?\s*r\.?\s*p|maximum\s*retail\s*price|incl\.?\s*of\s*all\s*tax(?:es)?|net\s*(?:qty|quantity|wt|weight|vol|volume|content)|mfg|mfd|mkt|mktd|packed\s*by|manufactured\s*by|marketed\s*by|best\s*before|use\s*by|date\s*of\s*(?:pkg|packing|packaging|mfg)|expiry\s*date|exp\s*date|consumer\s*care|customer\s*care|toll\s*free|helpline|fssai|lic\.?\s*no|batch|lot|country\s*of\s*origin|made\s*in\s*india|unit\s*sale\s*price|usp|commodity|packaged)\b|(?:rs\.?|₹|inr)\s*\d+/i;
+  if (statutoryRegex.test(text)) return true;
+
+  // 2. Packaging commodities and established brands
+  const commodityRegex = /\b(?:salt|iodised|vacuum\s*evaporated|sugar|rice|atta|flour|wheat|refined\s*oil|mustard\s*oil|sunflower\s*oil|soyabean\s*oil|soap|detergent|shampoo|toothpaste|tea|coffee|biscuit|biscuits|milk|butter|cheese|ghee|dal|noodles|chips|spices|masala|turmeric|chilli|coriander|tata|amul|aashirvaad|fortune|parle|britannia|haldiram|nestle|dabur|patanjali|itc|dettol|colgate|lifebuoy|surf\s*excel)\b/i;
+  if (commodityRegex.test(text)) return true;
+
+  // 3. Minimum text coherence: needs at least 5 meaningful words (>= 4 letters) and good coherence ratio
+  const coherentWords = text.match(/\b[a-zA-Z]{4,}\b/g) || [];
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (coherentWords.length >= 5 && (coherentWords.length / tokens.length) >= 0.35) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * Master parser for real user uploaded images.
  * STRICTLY NO HARDCODED DEMO FALLBACKS!
  * @param {string} rawText - Actual OCR text extracted from image
@@ -767,6 +821,114 @@ export function parseRealImageDeclarations(rawText, imageMeta = {}) {
   const sourceImageType = imageMeta.imageType || 'Front Label';
   const lines = imageMeta.lines || [];
   const dimensions = imageMeta.dimensions || { width: 0, height: 0 };
+
+  const isGenuine = isGenuineProductLabel(text, imageMeta.barcodes || []);
+  if (!isGenuine) {
+    return {
+      rawOCRText: text,
+      isGenuineProduct: false,
+      productName: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No genuine product label detected in image. Please point camera directly at a product package with clear text (MRP, Net Qty, Brand).',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      brand: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      netQuantity: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      mrp: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      manufacturer: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      manufactureDate: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      expiryDate: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      consumerCare: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      countryOfOrigin: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+      unitSalePrice: {
+        value: null,
+        confidence: 0,
+        status: 'NOT_DETECTED',
+        remarks: 'No product label detected in image.',
+        boundingBox: null,
+        imageRegion: null,
+        sourceImageId,
+        sourceImageType,
+      },
+    };
+  }
 
   const mrpRes = extractMRP(text);
   const qtyRes = extractNetQuantity(text);
