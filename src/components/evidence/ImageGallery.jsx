@@ -4,9 +4,9 @@
 // ============================================================
 
 import React, { useState } from 'react';
-import { Camera, Eye, Trash2, RefreshCw, CheckCircle, AlertTriangle, QrCode, Sparkles, Layers } from 'lucide-react';
+import { Camera, Eye, Trash2, RotateCw, QrCode, Layers } from 'lucide-react';
 
-export default function ImageGallery({ images = [], onRemove, onReplace, onAddMore }) {
+export default function ImageGallery({ images = [], onRemove, onReplace, onRotate, onAddMore }) {
   const [selectedImage, setSelectedImage] = useState(null);
 
   return (
@@ -61,14 +61,26 @@ export default function ImageGallery({ images = [], onRemove, onReplace, onAddMo
                     {/* Action buttons overlay */}
                     <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
                       <button
+                        type="button"
                         onClick={() => setSelectedImage(img)}
                         className="p-2 bg-white text-slate-900 rounded-full hover:bg-teal-50 shadow"
                         title="Fullscreen Preview"
                       >
                         <Eye className="w-4 h-4 text-teal-700" />
                       </button>
+                      {onRotate && !img.isDemoPreset && (
+                        <button
+                          type="button"
+                          onClick={() => onRotate(img.imageId || idx)}
+                          className="p-2 bg-white text-slate-900 rounded-full hover:bg-teal-50 shadow"
+                          title="Rotate 90° Clockwise"
+                        >
+                          <RotateCw className="w-4 h-4 text-teal-700" />
+                        </button>
+                      )}
                       {onRemove && (
                         <button
+                          type="button"
                           onClick={() => onRemove(img.imageId || idx)}
                           className="p-2 bg-white text-red-600 rounded-full hover:bg-red-50 shadow"
                           title="Remove Image"

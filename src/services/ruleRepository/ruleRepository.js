@@ -50,8 +50,8 @@ export const RULES_REPOSITORY = [
     manualVerificationAllowed: true,
     dataKey: 'manufacturer',
     applicableCategories: ['ALL'],
-    patterns: [/(?:mfd|manufactured|packed|packer|importer|marketed).*by/i],
-    keywords: ['manufactured by', 'mfd by', 'packed by', 'marketed by', 'importer'],
+    patterns: [/(?:mfd|mfg|mkt|manufactured|packed|packer|importer|marketed).*by/i],
+    keywords: ['manufactured by', 'mfd by', 'mfg by', 'mkt by', 'packed by', 'marketed by', 'importer'],
   },
   {
     id: 'REQ_02',

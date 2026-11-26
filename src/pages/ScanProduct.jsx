@@ -9,7 +9,7 @@ import { useOCR } from '../hooks/useOCR';
 import { PRODUCT_CATEGORIES, detectCategoryFromText } from '../services/ruleEngine/productCategories';
 import { findMatchingProducts } from '../services/products/productMatcher';
 import { analyzeImageQuality } from '../services/imageProcessing/imageQualityAnalyzer';
-import { preprocessImage } from '../services/imageProcessing/imagePreprocessor';
+import { rotateImageFile } from '../services/imageProcessing/imagePreprocessor';
 import { detectBarcodes } from '../services/barcode/barcodeService';
 import { fuseMultiImageScan } from '../services/inspection/dataFusionService';
 import { attachVisualEvidence, calculateEvidenceCoverage } from '../services/evidence/evidenceMapperService';
@@ -119,6 +119,31 @@ export default function ScanProduct() {
     toast.success('Label image removed');
   };
 
+  const handleRotateImage = async (idOrIdx) => {
+    const targetIdx = labelImages.findIndex((img, idx) => img.imageId === idOrIdx || idx === idOrIdx);
+    if (targetIdx === -1) return;
+    const target = labelImages[targetIdx];
+    if (target.isDemoPreset || !target.file) return;
+
+    try {
+      const rotated = await rotateImageFile(target.file, 90);
+      if (!rotated) return;
+      if (target.preview && target.preview.startsWith('blob:')) {
+        try { URL.revokeObjectURL(target.preview); } catch (_) {}
+      }
+      setLabelImages(prev =>
+        prev.map((item, idx) =>
+          idx === targetIdx
+            ? { ...item, file: rotated.file, preview: rotated.preview, url: rotated.preview }
+            : item
+        )
+      );
+      toast.success(`Rotated ${target.imageType} 90°`);
+    } catch {
+      toast.error('Could not rotate image');
+    }
+  };
+
   const handleClear = () => {
     setLabelImages([]);
     setEditedData({});
@@ -156,41 +181,19 @@ export default function ScanProduct() {
         await new Promise(r => setTimeout(r, 150));
       }
 
-      // Process each image through Preprocessing, OCR, Barcode & Quality
+      // Process each image through Orientation-Aware Multi-Variant Preprocessing, OCR, Barcode & Quality
       for (const img of labelImages) {
-        let ocrTarget = img.file;
-        let preprocessedInfo = null;
         const imgMeta = {
           imageId: img.imageId,
           imageType: img.imageType,
           fileName: img.fileName,
         };
 
-        // 1. Run genuine Canvas Preprocessing BEFORE OCR
-        try {
-          preprocessedInfo = await preprocessImage(img.file);
-          if (preprocessedInfo?.processedBlob) {
-            ocrTarget = preprocessedInfo.processedBlob;
-            img.preprocessed = preprocessedInfo;
-          }
-        } catch (prepErr) {
-          console.warn(`Preprocessing fallback triggered for ${img.fileName}:`, prepErr);
-        }
-
-        // 2. OCR extraction using preprocessed image (or original fallback)
-        let res = await startScan(ocrTarget, img.isDemoPreset || false, imgMeta);
-
-        // Color-preservation fallback: if grayscale/contrast preprocessing yielded minimal text
-        // on colored packaging, retry OCR on the original uploaded image and keep richer output.
-        if (!img.isDemoPreset && ocrTarget !== img.file && (!res?.rawText || res.rawText.trim().length < 15)) {
-          const origRes = await startScan(img.file, false, imgMeta);
-          if (origRes && (origRes.rawText || '').trim().length > (res?.rawText || '').trim().length) {
-            res = origRes;
-          }
-        }
+        const res = await startScan(img.file, img.isDemoPreset || false, imgMeta);
 
         if (res?.rawText && res.rawText.trim()) {
-          rawTextSegments.push(`[${img.imageType} — ${img.fileName}]\n${res.rawText.trim()}`);
+          const rotNote = res.appliedRotation ? ` (Auto-rotated ${res.appliedRotation}°)` : '';
+          rawTextSegments.push(`[${img.imageType} — ${img.fileName}${rotNote}]\n${res.rawText.trim()}`);
         }
 
         // 3. Barcode detection
@@ -451,6 +454,7 @@ export default function ScanProduct() {
             <ImageGallery
               images={labelImages}
               onRemove={handleRemoveImage}
+              onRotate={handleRotateImage}
             />
           </div>
 

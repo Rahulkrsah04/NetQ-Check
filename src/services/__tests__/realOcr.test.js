@@ -16,9 +16,10 @@ import {
   parseRealImageDeclarations,
   safeContextualClean,
 } from '../ocr/realOcrParser.js';
-import { ocrService } from '../ocrService.js';
+import { ocrService, scoreOcrReadability, rotateNormalizedBox, mergePassExtractions } from '../ocrService.js';
 import { fuseMultiImageScan, normalizeForEquivalence } from '../inspection/dataFusionService.js';
-import { normalizeMRP, normalizeQuantity } from '../normalization/dataNormalizer.js';
+import { normalizeMRP, normalizeQuantity, normalizeDate, normalizeAddress } from '../normalization/dataNormalizer.js';
+import { validateDate, validateAddress } from '../validators/reusableValidators.js';
 
 let passed = 0;
 let failed = 0;
@@ -205,6 +206,63 @@ export async function runRealOcrTestSuite() {
   assert(fusedReal.hasConflicts === false, 'Front vs Back differing Product Name / equivalent date (08/2026 == 08-2026) does NOT trigger false conflict error');
   assert(fusedReal.unifiedData.productName.value === 'Veeba Peanut Butter', 'Multi-image fusion prefers Front Label for Product Name');
   assert(fusedReal.unifiedData.manufacturer.value.includes('VRB Consumer Products'), 'Multi-image fusion retains Back Label Manufacturer details');
+
+  // [15] Real-world Packaged Salt Label: Gibberish Rejection, Nutrition Safety, Mkt/Mfg By, Date of Packaging & Consumer Care
+  console.log('\n[15] Test Case 15: Packaged Salt OCR Robustness (Gibberish, Nutrition mg, MRP variants, Date of Packaging, Consumer Care)');
+  const sidewaysGarbageText = 'v. ay AND \\ . ps\nPe Be \\ pr\n—cnccmmee |\ns ITE > red\nLon -';
+  const parsedGarbage = parseRealImageDeclarations(sidewaysGarbageText);
+  assert(parsedGarbage.productName.value === null, 'Rejects sideways OCR symbol/fragment gibberish ("v. ay AND \\ . ps") instead of falsely verifying as Product Name');
+
+  const saltBackOcrText = [
+    'DID YOU KNOW?',
+    '3 | Tata Salt is made with Vacuum Evaporation technology',
+    'Mkt by: Tata Consumer Products Limited, Tata Centre',
+    '1st Floor, 43, Jawaharlal Nehru Road, Kolkata - 700 071.',
+    'Mfg by: Tata Chemicals Limited, Mithapur - 361 345, Gujarat.',
+    'values por 100g Por Sorve (%) RDA',
+    'Added Sugars 9, Total Fat 0 g',
+    'Sodium 38000 mg [19], lodine 2 mg [14]',
+    'CONSUMER CARE DETAILS: CUSTOMER CARE EXECUTIVE',
+    'TATA CONSUMER PRODUCTS LTD., KIRLOSKAR BUSINESS PARK, HEBBAL, BENGALURU - 560 024.',
+    'OLL FREE NUMBER: 1800 108 4488',
+    'EMAIL: care@tataconsumer.com',
+    'MRP 2 32.00 incl of all taxes',
+    'NET QUANTITY:',
+    'Date of',
+    'Packaging: sEp/26',
+    'Use By: AUG/28',
+  ].join('\n');
+  const parsedSalt = parseRealImageDeclarations(saltBackOcrText, { imageId: 'IMG-SALT-B', imageType: 'Back Label' });
+  assert(parsedSalt.productName.value === 'Tata Salt', 'Extracts "Tata Salt" from back-label inline brand context');
+  assert(parsedSalt.mrp.value === '₹32.00', 'Extracts MRP ₹32.00 cleanly even when ₹ is OCR-corrupted as "2" and ignores "Sugars 9"');
+  assert(parsedSalt.netQuantity.value === null, 'Does NOT mistake "38000 mg", "2 mg", "100g", or "0 g" from Nutrition Facts for Net Quantity');
+  assert(parsedSalt.netQuantity.remarks.includes('NET QUANTITY label detected'), 'Provides actionable remark when NET QUANTITY heading is present without legible value');
+  assert(parsedSalt.manufacturer.value && parsedSalt.manufacturer.value.includes('Tata Consumer Products Limited') && parsedSalt.manufacturer.value.includes('700 071'), 'Extracts multi-line Mkt by manufacturer with spaced PIN code 700 071');
+  assert(parsedSalt.manufactureDate.value === 'SEP/26', 'Extracts "Date of\\nPackaging: sEp/26" as SEP/26');
+  assert(parsedSalt.expiryDate.value === 'AUG/28', 'Extracts "Use By: AUG/28" as AUG/28');
+  assert(parsedSalt.consumerCare.value && parsedSalt.consumerCare.value.includes('1800 108 4488') && parsedSalt.consumerCare.value.includes('care@tataconsumer.com'), 'Extracts both toll-free helpline and email from multi-line Consumer Care block');
+
+  // [16] OCR Readability Scoring, Orientation Bbox Inverse Mapping, & Date/PIN Normalization
+  console.log('\n[16] Test Case 16: Readability Scoring, Rotation Bbox Mapping & MMM/YY Normalization');
+  const garbageScore = scoreOcrReadability('Pe Be \\ pr —cnccmmee |', 36);
+  const uprightScore = scoreOcrReadability('Vacuum Evaporated Iodised Edible Common Salt MRP 32.00', 60);
+  assert(uprightScore.score > garbageScore.score * 2 && uprightScore.wordCount >= 6, 'scoreOcrReadability strongly prefers upright readable text over sideways gibberish');
+
+  const rot90Box = rotateNormalizedBox({ x: 90, y: 20, width: 10, height: 40 }, 90);
+  assert(rot90Box.x === 20 && rot90Box.y === 0 && rot90Box.width === 40 && rot90Box.height === 10, 'rotateNormalizedBox maps 90° CW box back to original image coordinates');
+
+  const mergedPasses = mergePassExtractions([
+    { passName: 'pass1', extractedData: parseRealImageDeclarations('MRP ¥ 32,00 incl of all tax\nDate of Packaging: SEP/26') },
+    { passName: 'pass2', extractedData: parseRealImageDeclarations('Mkt by: Tata Consumer Products Ltd, Kolkata - 700 071\nTOLL FREE 1800 108 4488\nEMAIL: care@tataconsumer.com') },
+  ]);
+  assert(mergedPasses.mrp.value === '₹32.00' && mergedPasses.manufactureDate.value === 'SEP/26' && mergedPasses.manufacturer.value.includes('700 071') && mergedPasses.consumerCare.value.includes('1800 108 4488'), 'mergePassExtractions fuses best fields across complementary OCR preprocessing passes');
+
+  const normSepDate = normalizeDate('SEP/26');
+  assert(normSepDate.month === 9 && normSepDate.year === 2026 && normSepDate.normalizedValue === '09/2026', 'normalizeDate parses MMM/YY format (SEP/26 -> 09/2026)');
+  assert(validateDate('SEP/26', normSepDate).isValid === true, 'validateDate accepts MMM/YY packaged label format (SEP/26)');
+
+  const normPinAddr = normalizeAddress('Tata Consumer Products Ltd, Kolkata - 700 071');
+  assert(normPinAddr.pinCode === '700071' && validateAddress(normPinAddr.rawValue, normPinAddr).isWarning !== true, 'normalizeAddress and validateAddress accept spaced Indian PIN codes (700 071)');
 
   console.log('\n============================================================');
   console.log(` Test Execution Complete: ${passed} Passed, ${failed} Failed`);

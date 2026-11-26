@@ -5,6 +5,264 @@
 // ============================================================
 
 import { parseRealImageDeclarations } from './ocr/realOcrParser.js';
+import { generateOcrVariants } from './imageProcessing/imagePreprocessor.js';
+
+let sharedTesseractWorker = null;
+let workerInitPromise = null;
+
+async function getSharedOcrWorker() {
+  if (sharedTesseractWorker) return sharedTesseractWorker;
+  if (workerInitPromise) return workerInitPromise;
+
+  workerInitPromise = (async () => {
+    const { createWorker } = await import('tesseract.js');
+    const worker = await createWorker('eng', 1, { logger: () => {} });
+    sharedTesseractWorker = worker;
+    workerInitPromise = null;
+    return worker;
+  })().catch((err) => {
+    workerInitPromise = null;
+    sharedTesseractWorker = null;
+    throw err;
+  });
+
+  return workerInitPromise;
+}
+
+async function resetSharedOcrWorker() {
+  if (sharedTesseractWorker) {
+    try {
+      await sharedTesseractWorker.terminate();
+    } catch (_) {}
+    sharedTesseractWorker = null;
+  }
+  workerInitPromise = null;
+}
+
+/**
+ * Scores OCR text readability to distinguish upright text from sideways/upside-down gibberish.
+ * @param {string} text
+ * @param {number} [confidence=0]
+ * @returns {{ score: number, wordCount: number, keywordCount: number }}
+ */
+export function scoreOcrReadability(text = '', confidence = 0) {
+  if (!text || typeof text !== 'string') {
+    return { score: 0, wordCount: 0, keywordCount: 0 };
+  }
+
+  const rawWords = text.match(/\b[a-zA-Z]{3,}\b/g) || [];
+  const validWords = rawWords.filter(
+    (w) => /[aeiouy]/i.test(w) && !/[bcdfghjklmnpqrstvwxz]{5,}/i.test(w)
+  );
+  const kwMatches =
+    text.match(
+      /\b(?:mrp|net|qty|quantity|weight|mfg|mfd|mkt|packed|packaging|use\s*by|best\s*before|expiry|consumer|care|toll|email|india|salt|oil|rice|atta|ingredients|nutrition|fssai|limited|ltd|pvt|edible|iodised|evaporated|tata|product|serving|calories|protein|incl|taxes)\b/gi
+    ) || [];
+
+  const score = validWords.length * 3 + kwMatches.length * 8 + (Number(confidence) || 0) * 0.25;
+  return {
+    score,
+    wordCount: validWords.length,
+    keywordCount: kwMatches.length,
+  };
+}
+
+/**
+ * Transforms a normalized percentage bounding box [0..100] from a clockwise-rotated
+ * OCR canvas back to the original unrotated image coordinate frame.
+ * @param {Object|null} box
+ * @param {number} appliedRotation - 0, 90, 180, or 270 degrees clockwise
+ * @returns {Object|null}
+ */
+export function rotateNormalizedBox(box, appliedRotation = 0) {
+  if (!box || typeof box !== 'object') return box;
+  const norm = ((appliedRotation % 360) + 360) % 360;
+  if (norm === 0) return box;
+
+  const { x = 0, y = 0, width = 0, height = 0 } = box;
+  let nx = x;
+  let ny = y;
+  let nw = width;
+  let nh = height;
+
+  if (norm === 90) {
+    nx = y;
+    ny = Math.max(0, 100 - (x + width));
+    nw = height;
+    nh = width;
+  } else if (norm === 180) {
+    nx = Math.max(0, 100 - (x + width));
+    ny = Math.max(0, 100 - (y + height));
+  } else if (norm === 270) {
+    nx = Math.max(0, 100 - (y + height));
+    ny = x;
+    nw = height;
+    nh = width;
+  }
+
+  return {
+    ...box,
+    x: Math.round(nx * 10) / 10,
+    y: Math.round(ny * 10) / 10,
+    width: Math.round(nw * 10) / 10,
+    height: Math.round(nh * 10) / 10,
+  };
+}
+
+function scoreFieldCandidate(fieldKey, candidate) {
+  if (!candidate || !candidate.value) return -1;
+  const val = String(candidate.value);
+  let score = (candidate.confidence || 0.7) * 100;
+
+  if (fieldKey === 'mrp') {
+    if (candidate.status !== 'NEEDS_REVIEW') score += 30;
+    if (/\.\d{2}$/.test(val)) score += 10;
+  } else if (fieldKey === 'manufacturer') {
+    if (/\b\d{3}\s?\d{3}\b/.test(val)) score += 30;
+    if (/\b(?:ltd|limited|pvt|private|inc|corp|chemicals|consumer|products|foods)\b/i.test(val)) score += 20;
+    score += Math.min(val.length, 100) * 0.25;
+  } else if (fieldKey === 'consumerCare') {
+    if (val.includes('|')) score += 30;
+    if (/1[89]00[\s\-]?\d{3,4}[\s\-]?\d{3,4}/.test(val)) score += 20;
+    if (/@/.test(val)) score += 15;
+    score += Math.min(val.length, 60) * 0.15;
+  } else if (fieldKey === 'productName') {
+    const words = val.split(/\s+/).filter(Boolean);
+    if (words.length >= 2 && words.length <= 6) score += 15;
+    if (/\b(?:salt|oil|rice|atta|flour|butter|soap|cream|powder|biscuits|tea|coffee|milk|water|sugar|dal|masala|juice|iodised|evaporated)\b/i.test(val)) {
+      score += 20;
+    }
+  } else if (fieldKey === 'netQuantity') {
+    if (/\b(?:kg|g|l|ml|pcs)\b/i.test(val)) score += 25;
+  }
+
+  return score;
+}
+
+/**
+ * Merges declaration extractions across multiple preprocessing passes of the same image.
+ * Keeps the highest-quality extraction per field and keeps brand paired with winning productName.
+ * @param {Array<{ passName: string, extractedData: Object }>} passResults
+ * @returns {Object}
+ */
+export function mergePassExtractions(passResults = []) {
+  if (!passResults || passResults.length === 0) {
+    return parseRealImageDeclarations('');
+  }
+  if (passResults.length === 1) {
+    return passResults[0].extractedData;
+  }
+
+  const base = { ...passResults[0].extractedData };
+  const keys = [
+    'productName',
+    'brand',
+    'netQuantity',
+    'mrp',
+    'manufacturer',
+    'manufactureDate',
+    'expiryDate',
+    'consumerCare',
+    'countryOfOrigin',
+    'unitSalePrice',
+  ];
+
+  let winningProductPassIdx = 0;
+
+  for (const key of keys) {
+    if (key === 'brand') continue; // keep brand synchronized with winning productName
+
+    let bestItem = base[key];
+    let bestScore = scoreFieldCandidate(key, bestItem);
+    let bestIdx = 0;
+
+    passResults.forEach((p, idx) => {
+      const candidate = p.extractedData?.[key];
+      const s = scoreFieldCandidate(key, candidate);
+      if (s > bestScore) {
+        bestScore = s;
+        bestItem = candidate;
+        bestIdx = idx;
+      } else if (!bestItem?.value && candidate) {
+        // Keep richer NOT_DETECTED remarks (e.g. "NET QUANTITY label detected..." or onlineSellingPrice)
+        if (candidate.onlineSellingPrice && !bestItem?.onlineSellingPrice) {
+          bestItem = candidate;
+        } else if (candidate.remarks && (!bestItem?.remarks || candidate.remarks.length > bestItem.remarks.length)) {
+          bestItem = candidate;
+        }
+      }
+    });
+
+    base[key] = bestItem;
+    if (key === 'productName') {
+      winningProductPassIdx = bestIdx;
+    }
+  }
+
+  if (passResults[winningProductPassIdx]?.extractedData?.brand?.value) {
+    base.brand = passResults[winningProductPassIdx].extractedData.brand;
+  }
+
+  return base;
+}
+
+function extractLinesFromTesseractData(data) {
+  if (Array.isArray(data?.lines) && data.lines.length > 0) {
+    return data.lines;
+  }
+  const lines = [];
+  if (Array.isArray(data?.blocks)) {
+    for (const b of data.blocks) {
+      for (const p of b.paragraphs || []) {
+        for (const l of p.lines || []) {
+          if (l) lines.push(l);
+        }
+      }
+    }
+  }
+  return lines;
+}
+
+function combineUniqueRawText(passTexts = []) {
+  const seen = new Set();
+  const combined = [];
+  for (const text of passTexts) {
+    if (!text) continue;
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const key = line.toLowerCase().replace(/\s+/g, ' ');
+      if (!seen.has(key)) {
+        seen.add(key);
+        combined.push(line);
+      }
+    }
+  }
+  return combined.join('\n');
+}
+
+async function recognizeTarget(worker, target) {
+  let imageUrl = typeof target === 'string' ? target : null;
+  let createdUrl = false;
+  if (!imageUrl && typeof Blob !== 'undefined' && target instanceof Blob) {
+    imageUrl = URL.createObjectURL(target);
+    createdUrl = true;
+  }
+  if (!imageUrl) return null;
+
+  try {
+    const { data } = await worker.recognize(imageUrl, {}, { text: true, blocks: true });
+    return {
+      text: data?.text || '',
+      confidence: data?.confidence || 0,
+      lines: extractLinesFromTesseractData(data),
+    };
+  } finally {
+    if (createdUrl && imageUrl) {
+      try { URL.revokeObjectURL(imageUrl); } catch (_) {}
+    }
+  }
+}
 
 /**
  * OCR Engine for processing real uploaded user product images
@@ -17,32 +275,159 @@ class RealImageOCRService {
       return this._generateDemoPreset(filename);
     }
 
+    const baseMeta = {
+      imageId: metaOverrides?.imageId || imageFile?.imageId || 'IMG-01',
+      imageType: metaOverrides?.imageType || imageFile?.imageType || 'Front Label',
+      fileName: metaOverrides?.fileName || imageFile?.name || imageFile?.fileName || 'label_image',
+    };
+
     try {
       let rawText = '';
       let ocrLines = [];
       let imageDimensions = { width: 0, height: 0 };
+      let appliedRotation = 0;
 
-      // Try Tesseract.js in browser if available
-      try {
-        const { createWorker } = await import('tesseract.js');
-        const worker = await createWorker('eng', 1, { logger: () => {} });
-        
-        let imageUrl = typeof imageFile === 'string' ? imageFile : null;
-        if (!imageUrl && imageFile instanceof Blob) {
-          imageUrl = URL.createObjectURL(imageFile);
-        }
+      const isLoadableImage =
+        (typeof Blob !== 'undefined' && imageFile instanceof Blob) ||
+        (typeof imageFile === 'string' &&
+          (imageFile.startsWith('data:') || imageFile.startsWith('blob:') || imageFile.startsWith('http')));
 
-        if (imageUrl) {
-          // Measure image dimensions before or alongside OCR
+      if (isLoadableImage) {
+        try {
+          const worker = await getSharedOcrWorker();
+
+          // 1. Browser Canvas multi-variant preprocessing + automatic orientation check
+          const primaryVariants = await generateOcrVariants(imageFile, {
+            rotationDegrees: 0,
+            variants: ['sharpenedColor'],
+          });
+
+          if (primaryVariants.isGenerated && primaryVariants.variants.sharpenedColor) {
+            let bestAngle = 0;
+            let bestPrimary = await recognizeTarget(worker, primaryVariants.variants.sharpenedColor);
+            let bestReadability = scoreOcrReadability(bestPrimary?.text, bestPrimary?.confidence);
+            let bestDimensions = primaryVariants.dimensions;
+
+            // If 0° yields poor/garbled text (e.g. sideways 90°/270° or upside-down 180° photo), auto-check rotations
+            if (bestReadability.wordCount < 5 || bestReadability.score < 45) {
+              for (const deg of [90, 270, 180]) {
+                const rotVariants = await generateOcrVariants(imageFile, {
+                  rotationDegrees: deg,
+                  variants: ['sharpenedColor'],
+                });
+                if (!rotVariants.isGenerated || !rotVariants.variants.sharpenedColor) continue;
+
+                const rotRes = await recognizeTarget(worker, rotVariants.variants.sharpenedColor);
+                const rotReadability = scoreOcrReadability(rotRes?.text, rotRes?.confidence);
+                if (
+                  rotReadability.score > bestReadability.score * 1.15 &&
+                  rotReadability.wordCount >= bestReadability.wordCount + 1
+                ) {
+                  bestAngle = deg;
+                  bestPrimary = rotRes;
+                  bestReadability = rotReadability;
+                  bestDimensions = rotVariants.dimensions;
+                }
+              }
+            }
+
+            appliedRotation = bestAngle;
+            imageDimensions = bestDimensions;
+
+            const passes = [
+              {
+                passName: 'sharpenedColor',
+                res: bestPrimary,
+              },
+            ];
+
+            // 2. Generate complementary local-contrast variants at the winning orientation
+            const extraVariants = await generateOcrVariants(imageFile, {
+              rotationDegrees: bestAngle,
+              variants: ['localContrastMax', 'localContrastInv'],
+            });
+
+            if (extraVariants.variants.localContrastMax) {
+              const maxRes = await recognizeTarget(worker, extraVariants.variants.localContrastMax);
+              if (maxRes) passes.push({ passName: 'localContrastMax', res: maxRes });
+            }
+
+            const prelimParsed = passes.map((p) => ({
+              passName: p.passName,
+              extractedData: parseRealImageDeclarations(p.res?.text || '', {
+                ...baseMeta,
+                dimensions: imageDimensions,
+                lines: p.res?.lines || [],
+              }),
+            }));
+            const prelimMerged = mergePassExtractions(prelimParsed);
+
+            // Run inverted white-on-color/dark pass if key declarations missing or readability still modest
+            const missingImportant =
+              !prelimMerged.productName?.value ||
+              !prelimMerged.mrp?.value ||
+              !prelimMerged.netQuantity?.value ||
+              !prelimMerged.manufacturer?.value ||
+              !prelimMerged.manufactureDate?.value ||
+              !prelimMerged.consumerCare?.value;
+
+            if ((missingImportant || bestReadability.score < 90) && extraVariants.variants.localContrastInv) {
+              const invRes = await recognizeTarget(worker, extraVariants.variants.localContrastInv);
+              if (invRes) passes.push({ passName: 'localContrastInv', res: invRes });
+            }
+
+            const finalParsedPasses = passes.map((p) => ({
+              passName: p.passName,
+              extractedData: parseRealImageDeclarations(p.res?.text || '', {
+                ...baseMeta,
+                dimensions: imageDimensions,
+                lines: p.res?.lines || [],
+              }),
+            }));
+
+            let extractedData = mergePassExtractions(finalParsedPasses);
+
+            // Map any rotated bounding boxes back onto the original uploaded image orientation
+            if (appliedRotation !== 0) {
+              Object.keys(extractedData).forEach((k) => {
+                if (extractedData[k] && typeof extractedData[k] === 'object' && extractedData[k].boundingBox) {
+                  const unrotated = rotateNormalizedBox(extractedData[k].boundingBox, appliedRotation);
+                  extractedData[k] = {
+                    ...extractedData[k],
+                    boundingBox: unrotated,
+                    imageRegion: unrotated,
+                  };
+                }
+              });
+            }
+
+            rawText = combineUniqueRawText(passes.map((p) => p.res?.text || ''));
+            ocrLines = passes.flatMap((p) => p.res?.lines || []);
+            extractedData.rawOCRText = rawText;
+
+            return {
+              success: true,
+              rawText,
+              extractedData,
+              rawOCRData: {
+                text: rawText,
+                lines: ocrLines,
+                dimensions: imageDimensions,
+              },
+              appliedRotation,
+              provider: 'real_ocr',
+              isDemoData: false,
+            };
+          }
+
+          // Fallback single-pass OCR when Canvas variant generation is unavailable
+          let imageUrl = typeof imageFile === 'string' ? imageFile : URL.createObjectURL(imageFile);
           if (typeof Image !== 'undefined') {
             try {
               await new Promise((resolve) => {
                 const img = new Image();
                 img.onload = () => {
-                  imageDimensions = {
-                    width: img.naturalWidth || img.width || 0,
-                    height: img.naturalHeight || img.height || 0,
-                  };
+                  imageDimensions = { width: img.naturalWidth || img.width || 0, height: img.naturalHeight || img.height || 0 };
                   resolve();
                 };
                 img.onerror = () => resolve();
@@ -50,53 +435,20 @@ class RealImageOCRService {
               });
             } catch (_) {}
           }
-
-          const { data } = await worker.recognize(imageUrl, {}, { text: true, blocks: true });
-          rawText = data.text || '';
-
-          // Tesseract v5 places spatial lines inside data.blocks -> paragraphs -> lines
-          ocrLines = [];
-          if (Array.isArray(data.lines) && data.lines.length > 0) {
-            ocrLines = data.lines;
-          } else if (Array.isArray(data.blocks)) {
-            for (const b of data.blocks) {
-              for (const p of (b.paragraphs || [])) {
-                for (const l of (p.lines || [])) {
-                  if (l) ocrLines.push(l);
-                }
-              }
-            }
-          }
-
-          // If dimensions not obtained via Image, fallback to Tesseract line coordinate extremes
-          if (imageDimensions.width === 0 || imageDimensions.height === 0) {
-            let maxX = 0;
-            let maxY = 0;
-            for (const l of ocrLines) {
-              if (l.bbox) {
-                if (l.bbox.x1 > maxX) maxX = l.bbox.x1;
-                if (l.bbox.y1 > maxY) maxY = l.bbox.y1;
-              }
-            }
-            if (maxX > 0 && maxY > 0) {
-              imageDimensions = { width: maxX, height: maxY };
-            }
-          }
-
+          const singleRes = await recognizeTarget(worker, imageUrl);
+          rawText = singleRes?.text || '';
+          ocrLines = singleRes?.lines || [];
           if (typeof imageFile !== 'string' && imageUrl.startsWith('blob:')) {
             URL.revokeObjectURL(imageUrl);
           }
+        } catch (tessErr) {
+          console.warn('Tesseract OCR engine fallback:', tessErr.message);
+          await resetSharedOcrWorker();
         }
-        await worker.terminate();
-      } catch (tessErr) {
-        console.warn('Tesseract OCR engine fallback:', tessErr.message);
       }
 
-      // If text extracted via OCR, parse declarations using Real Image OCR Parser
       const imageMeta = {
-        imageId: metaOverrides?.imageId || imageFile?.imageId || 'IMG-01',
-        imageType: metaOverrides?.imageType || imageFile?.imageType || 'Front Label',
-        fileName: metaOverrides?.fileName || imageFile?.name || imageFile?.fileName || 'label_image',
+        ...baseMeta,
         dimensions: imageDimensions,
         lines: ocrLines,
       };
@@ -111,19 +463,16 @@ class RealImageOCRService {
           lines: ocrLines,
           dimensions: imageDimensions,
         },
+        appliedRotation,
         provider: 'real_ocr',
         isDemoData: false,
       };
     } catch (err) {
       console.error('Real OCR processing error:', err);
-      // Return NOT_DETECTED state rather than fake demo data
       return {
         success: true,
         rawText: '',
-        extractedData: parseRealImageDeclarations('', {
-          imageId: metaOverrides?.imageId || imageFile?.imageId || 'IMG-01',
-          imageType: metaOverrides?.imageType || imageFile?.imageType || 'Front Label',
-        }),
+        extractedData: parseRealImageDeclarations('', baseMeta),
         provider: 'real_ocr',
         isDemoData: false,
         error: err.message,

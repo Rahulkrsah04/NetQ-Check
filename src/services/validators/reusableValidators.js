@@ -87,10 +87,14 @@ export function validateDate(rawValue, parsedDetails = null) {
   if (!presence.isValid) return presence;
 
   const str = String(rawValue);
-  const dateMatch = str.match(/(?:\d{2}[\/\-]\d{4})|(?:\d{2}[\/\-]\d{2})/);
+  const hasParsed = parsedDetails?.month && parsedDetails?.year;
+  const dateMatch =
+    hasParsed ||
+    str.match(/(?:\d{2}[\/\-]\d{4})|(?:\d{2}[\/\-]\d{2})/) ||
+    str.match(/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s*[\/\-\s]\s*\d{2,4}\b/i);
 
   if (!dateMatch) {
-    return { isValid: false, reason: 'Date declaration format invalid. Standard MM/YYYY or DD/MM/YYYY required under Rule 6(1)(d)' };
+    return { isValid: false, reason: 'Date declaration format invalid. Standard MM/YYYY or MMM/YY required under Rule 6(1)(d)' };
   }
 
   return { isValid: true, reason: 'Date declared in valid MM/YYYY format' };
@@ -118,14 +122,16 @@ export function validateText(rawValue, patterns = []) {
 }
 
 /**
- * Validate Consumer Care phone / helpline contact
+ * Validate Consumer Care phone / helpline / email contact
  */
 export function validatePhone(rawValue, parsedDetails = null) {
   const presence = validatePresence(rawValue);
   if (!presence.isValid) return presence;
 
   const str = String(rawValue);
-  const hasPhone = parsedDetails?.phone || /(?:1[89]00[-\s]?\d{3,4}[-\s]?\d{3,4})|(?:\+?91[-\s]?)?\d{8,11}|helpline|consumer|care|contact/i.test(str);
+  const hasPhone =
+    parsedDetails?.phone ||
+    /(?:1[89]00[-\s]?\d{3,4}[-\s]?\d{3,4})|(?:\+?91[-\s]?)?\d{8,11}|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|helpline|consumer|care|contact/i.test(str);
 
   if (!hasPhone) {
     return { isValid: false, reason: 'Consumer care helpline phone number / toll-free 1800 number not detected' };
@@ -142,7 +148,7 @@ export function validateAddress(rawValue, parsedDetails = null) {
   if (!presence.isValid) return presence;
 
   const str = String(rawValue);
-  const hasPin = parsedDetails?.pinCode || /\b\d{6}\b/.test(str);
+  const hasPin = parsedDetails?.pinCode || /\b\d{3}\s?\d{3}\b/.test(str);
 
   if (!hasPin) {
     return { isValid: true, isWarning: true, reason: 'Manufacturer address detected; PIN code recommended for full address compliance' };

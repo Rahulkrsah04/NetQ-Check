@@ -104,8 +104,15 @@ export function fuseMultiImageScan(labelScanResults = []) {
       if (!valText) {
         if (typeof fieldVal === 'object' && fieldVal !== null) {
           const prev = notDetectedMetadata[key];
-          // Prefer keeping metadata that carries actionable details (e.g., onlineSellingPrice or manual review)
-          if (!prev || (!prev.onlineSellingPrice && fieldVal.onlineSellingPrice) || (!prev.manualVerificationRequired && fieldVal.manualVerificationRequired)) {
+          const hasRicherRemarks =
+            fieldVal.remarks && (!prev?.remarks || fieldVal.remarks.length > prev.remarks.length);
+          // Prefer keeping metadata that carries actionable details (e.g., onlineSellingPrice, manual review, or specific label hint)
+          if (
+            !prev ||
+            (!prev.onlineSellingPrice && fieldVal.onlineSellingPrice) ||
+            (!prev.manualVerificationRequired && fieldVal.manualVerificationRequired) ||
+            (!prev.onlineSellingPrice && !prev.manualVerificationRequired && hasRicherRemarks)
+          ) {
             notDetectedMetadata[key] = {
               ...fieldVal,
               sourceImageId: imageId,
@@ -140,6 +147,9 @@ export function fuseMultiImageScan(labelScanResults = []) {
     if (!CONFLICT_CHECK_FIELDS.has(key)) {
       const sorted = [...occurrences].sort((a, b) => {
         if (key === 'productName' || key === 'brand') {
+          if (Math.abs(b.confidence - a.confidence) > 0.03) {
+            return b.confidence - a.confidence;
+          }
           const aFront = /front/i.test(a.imageLabel) ? 1 : 0;
           const bFront = /front/i.test(b.imageLabel) ? 1 : 0;
           if (aFront !== bFront) return bFront - aFront;
