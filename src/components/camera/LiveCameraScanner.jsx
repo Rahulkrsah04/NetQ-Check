@@ -139,11 +139,7 @@ export default function LiveCameraScanner({
     setFlashActive(true);
     setTimeout(() => setFlashActive(false), 200);
 
-    // If front camera, mirror image for natural feel
-    if (facingMode === 'user') {
-      ctx.translate(width, 0);
-      ctx.scale(-1, 1);
-    }
+    // IMPORTANT: Capture raw un-mirrored video frame so package text is upright and readable (left-to-right) for OCR
     ctx.drawImage(video, 0, 0, width, height);
 
     setIsCapturing(true);
@@ -285,7 +281,7 @@ export default function LiveCameraScanner({
           playsInline
           muted
           autoPlay
-          className={`w-full h-full object-cover ${permissionState === 'granted' ? 'block' : 'hidden'} ${facingMode === 'user' ? 'scale-x-[-1]' : ''}`}
+          className={`w-full h-full object-contain ${permissionState === 'granted' ? 'block' : 'hidden'}`}
         />
 
         {/* Targeting Reticle Overlay (Only when camera active) */}

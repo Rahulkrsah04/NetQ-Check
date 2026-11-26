@@ -269,13 +269,14 @@ export function extractNetQuantity(text) {
         if (isNaN(numericVal) || numericVal <= 0) continue; // Reject "0 g" / zero-value nutrition noise
 
         const unit = normalizeUnit(match[2]);
-        // Unlabeled "mg" is almost always micronutrient content (e.g. Sodium 38000 mg, Iodine 2 mg), never package net weight
+        // Unlabeled "mg" is micronutrient content; unlabeled small gram amounts (< 50g) without 'Net' prefix are nutrition facts/serving noise
         if (unit === 'mg') continue;
+        if (unit === 'g' && numericVal < 50 && !/\b(?:net|qty|quantity|wt|weight|content)\b/i.test(line)) continue;
 
         return {
           value: `${match[1]} ${unit}`,
           originalValue: match[0].trim(),
-          confidence: 0.95,
+          confidence: 0.85,
           uncertainCorrection: false,
         };
       }
@@ -675,14 +676,25 @@ export function extractProductNameAndBrand(text) {
     });
   });
 
+  const recognizedBrandRegex = /\b(?:tata|amul|aashirvaad|fortune|parle|britannia|haldiram|nestle|dabur|patanjali|itc|dettol|colgate|lifebuoy|surf\s*excel|freshglow|saffola|everest|catch|mdh|maggi|sunfeast|kissan)\b/i;
+
   if (candidates.length > 0) {
     candidates.sort((a, b) => b.score - a.score);
     const best = candidates[0];
-    const brand = best.name.split(' ')[0] || null;
-    return {
-      productName: { value: best.name, originalValue: best.name, confidence: best.confidence },
-      brand: { value: brand, originalValue: brand, confidence: Math.round(Math.min(0.80, best.confidence - 0.05) * 100) / 100 },
-    };
+
+    const hasCommodity = commodityKeywordRegex.test(best.name);
+    const hasBrand = recognizedBrandRegex.test(best.name);
+    const words = best.name.split(/\s+/).filter(Boolean);
+    const isTitleCase = words.length >= 2 && words.length <= 5 && words.every(w => /^[A-Z][a-zA-Z0-9&'.-]{2,}$/.test(w));
+
+    // Reject candidates that have no commodity, no brand, and are not clean Title-Case phrases
+    if (hasCommodity || hasBrand || (isTitleCase && best.score >= 55)) {
+      const brand = best.name.split(' ')[0] || null;
+      return {
+        productName: { value: best.name, originalValue: best.name, confidence: best.confidence },
+        brand: { value: brand, originalValue: brand, confidence: Math.round(Math.min(0.80, best.confidence - 0.05) * 100) / 100 },
+      };
+    }
   }
 
   return {
