@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Camera, Upload, Info, AlertCircle, CheckCircle, Edit3, PlayCircle, ArrowRight, Layers, Sparkles, PackageCheck, PlusCircle, Trash2, QrCode, ShieldAlert, AlertTriangle } from 'lucide-react';
 import { UploadBox, CaptureBox } from '../components/ui/UploadBox';
+import LiveCameraScanner from '../components/camera/LiveCameraScanner';
 import { ProgressStepper, ConfidenceBar } from '../components/ui/ProgressStepper';
 import Button from '../components/ui/Button';
 import ImageGallery from '../components/evidence/ImageGallery';
@@ -96,7 +97,33 @@ export default function ScanProduct() {
       setQualityWarnings(prev => [...prev, `${imageType}: ${quality.warning}`]);
     }
     toast.success(`Added ${imageType} (${quality.quality} quality)`);
+    return imageObj;
   }, [nextImageType]);
+
+  const handleInstantScanFromCamera = async (file, imageType) => {
+    const preview = URL.createObjectURL(file);
+    const quality = await analyzeImageQuality(file);
+
+    const imageObj = {
+      imageId: `IMG-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      file,
+      fileName: file.name,
+      fileSize: file.size,
+      imageType: imageType || nextImageType,
+      preview,
+      url: preview,
+      quality,
+      qualityScore: quality.score,
+      qualityStatus: quality.quality,
+      createdAt: new Date().toISOString(),
+      isDemoPreset: false,
+    };
+
+    const nextList = [...labelImages, imageObj];
+    setLabelImages(nextList);
+    toast.success(`Captured ${imageObj.imageType} — starting instant scan!`);
+    await handleAnalyze(nextList);
+  };
 
   const handleSelectPreset = (sample) => {
     const dummyFile = new File(['sample content'], sample.file, { type: 'image/png' });
@@ -160,8 +187,12 @@ export default function ScanProduct() {
     reset();
   };
 
-  const handleAnalyze = async () => {
-    if (labelImages.length === 0) {
+  const handleAnalyze = async (overrideImages = null) => {
+    const imagesToProcess = (Array.isArray(overrideImages) && overrideImages.length > 0)
+      ? overrideImages
+      : labelImages;
+
+    if (imagesToProcess.length === 0) {
       toast.error('Please upload or capture at least one product label image.');
       return;
     }
@@ -182,7 +213,7 @@ export default function ScanProduct() {
       }
 
       // Process each image through Orientation-Aware Multi-Variant Preprocessing, OCR, Barcode & Quality
-      for (const img of labelImages) {
+      for (const img of imagesToProcess) {
         const imgMeta = {
           imageId: img.imageId,
           imageType: img.imageType,
@@ -325,7 +356,7 @@ export default function ScanProduct() {
     // Save Scan Record
     const scanRecord = createScan({
       productId: activeProduct.productId,
-      images: labelImages.map(img => img.preview),
+      images: imagesToProcess.map(img => img.preview),
       rawOCRData: { text: combinedRawText || ocrResult?.rawText || 'Multi-Image Fusion OCR' },
       normalizedData: mappedWithEvidence,
       category: selectedCategory,
@@ -376,9 +407,9 @@ export default function ScanProduct() {
           evidenceCoverage: coverage.coveragePercentage,
           fusionResult,
         },
-        imageUrl: labelImages[0]?.preview,
+        imageUrl: imagesToProcess[0]?.preview,
         categoryId: selectedCategory,
-        labelImages,
+        labelImages: imagesToProcess,
       },
     });
   };
@@ -420,11 +451,40 @@ export default function ScanProduct() {
       {/* Upload & Multi-Image Section */}
       {(stage === 'idle' || stage === 'processing' || isAnalyzing) && (
         <div className="card space-y-5">
-          <div className="flex items-center justify-between border-b border-border pb-3 flex-wrap gap-2">
-            <h2 className="text-sm font-bold text-navy flex items-center gap-2">
-              <Upload className="w-4 h-4 text-primary" />
-              Add Label Images ({labelImages.length} Uploaded)
-            </h2>
+          {/* Input Method Toggle Tabs */}
+          <div className="flex items-center justify-between border-b border-border pb-3 flex-wrap gap-3">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                id="tab-upload-images"
+                onClick={() => setActiveTab('upload')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                  activeTab === 'upload'
+                    ? 'bg-primary text-white shadow-sm'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                <Upload className="w-4 h-4" />
+                Upload Images
+              </button>
+
+              <button
+                type="button"
+                id="tab-camera-scanner"
+                onClick={() => setActiveTab('camera')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                  activeTab === 'camera'
+                    ? 'bg-gradient-to-r from-teal-600 to-emerald-600 text-white shadow-md'
+                    : 'bg-slate-100 text-slate-700 hover:bg-teal-50 hover:text-teal-700'
+                }`}
+              >
+                <Camera className="w-4 h-4 text-emerald-400" />
+                <span>Live Camera Scanner</span>
+                <span className="text-[10px] tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 font-extrabold uppercase">
+                  Counter Scan
+                </span>
+              </button>
+            </div>
 
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-slate-600">Label Type:</span>
@@ -440,23 +500,47 @@ export default function ScanProduct() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {activeTab === 'upload' ? (
+          {activeTab === 'upload' ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <UploadBox
                 onFileSelect={(file) => handleAddImage(file, nextImageType, false)}
                 error={error}
               />
-            ) : (
-              <CaptureBox onFileSelect={(file) => handleAddImage(file, nextImageType, false)} />
-            )}
 
-            {/* Uploaded Gallery */}
-            <ImageGallery
-              images={labelImages}
-              onRemove={handleRemoveImage}
-              onRotate={handleRotateImage}
-            />
-          </div>
+              {/* Uploaded Gallery */}
+              <ImageGallery
+                images={labelImages}
+                onRemove={handleRemoveImage}
+                onRotate={handleRotateImage}
+              />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <LiveCameraScanner
+                initialLabelType={nextImageType}
+                onCapture={(file, type, instant) => {
+                  if (!instant) {
+                    handleAddImage(file, type, false);
+                  }
+                }}
+                onInstantScan={handleInstantScanFromCamera}
+                onClose={() => setActiveTab('upload')}
+                autoScanAvailable={!isAnalyzing && stage !== 'processing'}
+              />
+
+              {/* Uploaded Gallery below camera */}
+              {labelImages.length > 0 && (
+                <div className="pt-2">
+                  <h3 className="text-xs font-bold text-slate-700 mb-2">Captured / Uploaded Labels ({labelImages.length}):</h3>
+                  <ImageGallery
+                    images={labelImages}
+                    onRemove={handleRemoveImage}
+                    onRotate={handleRotateImage}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Quality Warning Notifications */}
           {qualityWarnings.length > 0 && (
