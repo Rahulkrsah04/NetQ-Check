@@ -34,6 +34,12 @@ import {
   detectBarcodes,
   isBarcodeDetectorSupported,
 } from '../barcode/barcodeService.js';
+import {
+  isQuotaExceededError,
+  getStorageUsageEstimate,
+  performStorageLruEviction,
+  StorageAdapter,
+} from '../repositories/storageAdapter.js';
 
 let passed = 0;
 let failed = 0;
@@ -357,6 +363,67 @@ export async function runStabilizationTestSuite() {
   // Test 30: Handles null/invalid input gracefully
   const nullBc = await detectBarcodes(null, 'IMG-NULL');
   assert(nullBc.detected === false && nullBc.type === 'NONE', 'Handles null input gracefully as non-error status');
+
+  console.log('\n[6] Testing BUG-06 Storage Quota Overflow & LRU Eviction');
+
+  // Test 31: QuotaExceededError detection across browser variants
+  assert(isQuotaExceededError({ name: 'QuotaExceededError' }) === true, 'Identifies Chrome/Safari QuotaExceededError');
+  assert(isQuotaExceededError({ name: 'NS_ERROR_DOM_QUOTA_REACHED' }) === true, 'Identifies Firefox NS_ERROR_DOM_QUOTA_REACHED');
+  assert(isQuotaExceededError({ code: 22 }) === true, 'Identifies legacy code 22 quota error');
+  assert(isQuotaExceededError(new Error('Storage quota has been exceeded')) === true, 'Identifies quota keyword in error message');
+  assert(isQuotaExceededError(new TypeError('Invalid argument')) === false, 'Rejects unrelated error types');
+
+  // Test 32: Storage usage diagnostics
+  const usage = getStorageUsageEstimate();
+  assert(typeof usage.usedBytes === 'number' && usage.quotaBytes > 0, 'getStorageUsageEstimate returns valid usage bytes and quota');
+  assert(usage.percentage >= 0 && usage.percentage <= 100, 'Usage percentage is within 0-100%');
+
+  // Test 33: performStorageLruEviction prunes oversized scan history
+  const mockStorage = {
+    data: {
+      'netq_db_scans_v4': JSON.stringify([
+        { scanId: '1' }, { scanId: '2' }, { scanId: '3' }, { scanId: '4' },
+        { scanId: '5' }, { scanId: '6' }, { scanId: '7' }, { scanId: '8' },
+      ]),
+      'netq_db_audit_v4': JSON.stringify(Array.from({ length: 40 }, (_, i) => ({ id: i }))),
+    },
+    getItem(k) { return this.data[k] || null; },
+    setItem(k, v) { this.data[k] = v; },
+  };
+  const evicted = performStorageLruEviction(mockStorage);
+  assert(evicted === true, 'performStorageLruEviction frees space when collections are oversized');
+  const remainingScans = JSON.parse(mockStorage.getItem('netq_db_scans_v4'));
+  assert(remainingScans.length === 5, 'LRU eviction trims scan collection to 5 most recent items');
+  const remainingAudit = JSON.parse(mockStorage.getItem('netq_db_audit_v4'));
+  assert(remainingAudit.length === 25, 'LRU eviction trims audit collection to 25 most recent items');
+
+  // Test 34: StorageAdapter gracefully handles simulated quota overflow without throwing
+  const testAdapter = new StorageAdapter('quota_test', []);
+  let writeAttempts = 0;
+  testAdapter._getStorage = () => ({
+    getItem: () => null,
+    setItem: () => {
+      writeAttempts++;
+      if (writeAttempts === 1) {
+        const quotaErr = new Error('Quota exceeded');
+        quotaErr.name = 'QuotaExceededError';
+        throw quotaErr;
+      }
+      // Succeeds on retry after eviction
+    },
+    removeItem: () => {},
+  });
+
+  let savedItem = null;
+  let didCrash = false;
+  try {
+    savedItem = testAdapter.save({ id: 'TEST-QUOTA-01', name: 'Item Saved Safely' }, 'id');
+  } catch (err) {
+    didCrash = true;
+  }
+  assert(didCrash === false, 'StorageAdapter.save catches QuotaExceededError without crashing');
+  assert(savedItem && savedItem.id === 'TEST-QUOTA-01', 'StorageAdapter.save recovers and returns saved item');
+  assert(writeAttempts >= 2, 'StorageAdapter retried write after handling quota overflow');
 
   console.log(`\n============================================================`);
   console.log(` Stabilization Test Execution Complete: ${passed} Passed, ${failed} Failed`);
