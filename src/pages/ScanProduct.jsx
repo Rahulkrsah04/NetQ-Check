@@ -271,8 +271,8 @@ export default function ScanProduct() {
           rawTextSegments.push(`[${img.imageType} — ${img.fileName}]\n${res.rawText.trim()}`);
         }
 
-        // 3. Barcode detection
-        const bc = await detectBarcodes(img.file, img.imageId);
+        // 3. Barcode detection (genuine browser BarcodeDetector with demo fallback)
+        const bc = await detectBarcodes(img.file, img.imageId, { isDemoPreset: img.isDemoPreset });
         setBarcodeResults(prev => [...prev, bc]);
 
         let extracted = res?.extractedData || {};

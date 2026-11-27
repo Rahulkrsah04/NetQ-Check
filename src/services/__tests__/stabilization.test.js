@@ -30,6 +30,10 @@ import {
   sanitizeScanImages,
   createScan,
 } from '../repositories/scanRepository.js';
+import {
+  detectBarcodes,
+  isBarcodeDetectorSupported,
+} from '../barcode/barcodeService.js';
 
 let passed = 0;
 let failed = 0;
@@ -327,6 +331,32 @@ export async function runStabilizationTestSuite() {
   assert(sanitized.length === 2, 'sanitizeScanImages removes transient blob URLs');
   assert(sanitized[0] === 'data:image/jpeg;base64,persistent-scan-thumbnail', 'sanitizeScanImages preserves persistent Base64 scan thumbnail');
   assert(sanitized[1] === 'https://example.com/scan.png', 'sanitizeScanImages preserves HTTPS scan image');
+
+  console.log('\n[5] Testing BUG-05 Real Barcode Detection Service');
+
+  // Test 26: isBarcodeDetectorSupported environment check
+  assert(typeof isBarcodeDetectorSupported() === 'boolean', 'isBarcodeDetectorSupported returns boolean environment check');
+
+  // Test 27: Real user File upload does NOT fabricate fake barcodes based on filename
+  const realUserSoapFile = new File(['fake pixel bytes'], 'my_soap_label.jpg', { type: 'image/jpeg' });
+  const realUserBc = await detectBarcodes(realUserSoapFile, 'IMG-REAL-01', { isDemoPreset: false });
+  assert(realUserBc.detected === false, 'Real user uploaded file does NOT invent fake barcode based on "soap" filename');
+  assert(realUserBc.value === null, 'Real user upload barcode value is null when not detected');
+  assert(realUserBc.type === 'NONE', 'Real user upload type is NONE when not detected');
+
+  // Test 28: Real user upload with 'atta' in filename does NOT invent 8901234567890
+  const realUserAttaFile = new File(['fake pixel bytes'], 'atta_package_side.png', { type: 'image/png' });
+  const realAttaBc = await detectBarcodes(realUserAttaFile, 'IMG-REAL-02', { isDemoPreset: false });
+  assert(realAttaBc.detected === false && realAttaBc.value === null, 'Real user upload does NOT inject mock EAN-13 for "atta"');
+
+  // Test 29: Explicit demo preset retains preset demo barcode
+  const demoPresetBc = await detectBarcodes({ name: 'soap_label.png' }, 'IMG-DEMO-01', { isDemoPreset: true });
+  assert(demoPresetBc.detected === true && demoPresetBc.type === 'EAN-13', 'Explicit demo preset mode preserves deterministic EAN-13 simulation');
+  assert(demoPresetBc.value === '8901030765432', 'Demo preset returns expected mock value');
+
+  // Test 30: Handles null/invalid input gracefully
+  const nullBc = await detectBarcodes(null, 'IMG-NULL');
+  assert(nullBc.detected === false && nullBc.type === 'NONE', 'Handles null input gracefully as non-error status');
 
   console.log(`\n============================================================`);
   console.log(` Stabilization Test Execution Complete: ${passed} Passed, ${failed} Failed`);
