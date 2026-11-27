@@ -81,11 +81,11 @@ export function extractMRP(text) {
 
   // 1. Strict Physical Package MRP regex (requires packaging context)
   // Handles optional "(Incl. of all taxes)" between MRP and amount, spaced "M R P", and common OCR currency glyphs
-  const packageMrpRegex = /(?:m\.?\s*r\.?\s*p\.?|maximum\s*retail\s*price|max\.?\s*retail\s*price)(?:\s*\(?\s*(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\s*\)?)?\s*[:\-;|]?\s*(?:rs\.?|₹|inr|re\.?|[?*=¥£€])?\s*([\d,]+(?:\.\d{1,2})?)(?:\s*\/\-)?(?:\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\)?)?/i;
+  const packageMrpRegex = /(?:m\.?\s*r\.?\s*p\.?|maximum\s*retail\s*price|max\.?\s*retail\s*price)(?:\s*\(?\s*(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\s*\)?)?\s*[:\-;|]?\s*(?:rs\.?|₹|inr|re\.?|[?*=¥£€])?\s*([\d,]+(?:\.\d{1,2})?)(?!\d|\s*(?:%|percent|off))\b(?:\s*\/\-)?(?:\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\)?)?/i;
 
   // Also check for "Inclusive of all taxes" trailing clause or trailing "(MRP)" which confirms printed package price
-  const taxClauseRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\-)?\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\)?/i;
-  const trailingMrpRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:\/\-)?\s*\(?\s*(?:m\.?\s*r\.?\s*p\.?|maximum\s*retail\s*price)\s*\)?/i;
+  const taxClauseRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)(?!\d|\s*(?:%|percent|off))\b\s*(?:\/\-)?\s*\(?(?:incl\.?|inclusive)\s*(?:of\s*)?(?:all\s*)?taxes\)?/i;
+  const trailingMrpRegex = /(?:rs\.?|₹|inr)\s*([\d,]+(?:\.\d{1,2})?)(?!\d|\s*(?:%|percent|off))\b\s*(?:\/\-)?\s*\(?\s*(?:m\.?\s*r\.?\s*p\.?|maximum\s*retail\s*price)\s*\)?/i;
 
   let packageMRP = null;
   let onlineSellingPrice = null;
@@ -98,6 +98,44 @@ export function extractMRP(text) {
     cleanedText.match(packageMrpRegex) ||
     cleanedText.match(taxClauseRegex) ||
     cleanedText.match(trailingMrpRegex);
+
+  // Multi-line MRP lookahead:
+  // Associate nearby price with MRP header across lines if not matched on single line
+  let multiLineMatch = null;
+  if (!pkgMatch) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (/(?:m\.?\s*r\.?\s*p\.?|maximum\s*retail\s*price|max\.?\s*retail\s*price)\b/i.test(line)) {
+        // Look ahead up to 3 subsequent lines
+        for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+          const candidateLine = lines[j];
+          if (/^(?:batch|lot|b\.?\s*no|\(?incl|\(?inclusive|usp|unit\s*sale\s*price|for\s*sale)/i.test(candidateLine) &&
+              !/(?:rs\.?|₹|inr)\s*[\d,]+/i.test(candidateLine)) {
+            continue;
+          }
+
+          const priceMatch = candidateLine.match(/(?:rs\.?|₹|inr|re\.?)?\s*([\d,]+(?:\.\d{1,2})?)(?!\d|\s*(?:%|percent|off))\b(?:\s*\/\-)?/i);
+          if (priceMatch && priceMatch[1]) {
+            const rawDigits = priceMatch[1];
+            if (!isNonPriceIdentifier(rawDigits, candidateLine) &&
+                !/\b(?:\d{1,2}\/\d{2,4}|\d{1,2}%\s*off|discount|save|cal|kcal|g|ml|kg|l)\b/i.test(candidateLine)) {
+              const parsedVal = parseFloat(rawDigits.replace(/,/g, ''));
+              if (parsedVal > 0 && parsedVal < 100000) {
+                multiLineMatch = {
+                  packageMRP: `₹${rawDigits}`,
+                  originalValue: `${line}\n${candidateLine}`,
+                  confidence: 0.95,
+                  rawDigits,
+                };
+                break;
+              }
+            }
+          }
+        }
+        if (multiLineMatch) break;
+      }
+    }
+  }
 
   // Detect online e-commerce / shopping app UI chrome context (word-bounded so "Vitamins" etc. never match)
   const isBlinkitContext = /\b(?:blinkit|zepto|instamart|swiggy|bigbasket|jiomart|amazon|flipkart)\b|\bdeliver(?:y|ing)?\s+in\s+\d+\s*mins?\b|\badd\s+to\s+cart\b|\bview\s+cart\b|\bcheckout\b|\b\d{1,2}%\s*off\b|\bsave\s*(?:rs\.?|₹)/i.test(cleanedText);
@@ -145,6 +183,16 @@ export function extractMRP(text) {
         if (otherPrices.length > 0) {
           onlineSellingPrice = `₹${otherPrices[0].amount}`;
         }
+      }
+    }
+  } else if (multiLineMatch) {
+    packageMRP = multiLineMatch.packageMRP;
+    originalValue = multiLineMatch.originalValue;
+    confidence = multiLineMatch.confidence;
+    if (isBlinkitContext && standaloneMatches.length > 0) {
+      const otherPrices = standaloneMatches.filter(m => m.amount !== parseFloat(multiLineMatch.rawDigits.replace(/,/g, '')));
+      if (otherPrices.length > 0) {
+        onlineSellingPrice = `₹${otherPrices[0].amount}`;
       }
     }
   } else if (isBlinkitContext && standaloneMatches.length > 0) {
@@ -219,9 +267,12 @@ export function extractNetQuantity(text) {
     return u;
   };
 
+  // Boundary condition allows unspaced units (50g, 500ml, 1kg, 2L, 750ml, 100ge)
+  const boundary = '(?:\b|(?=[℮e\s\\.\\,\\/\\(\\)\\-]|[^a-z0-9]|$))';
+
   // 1. Prioritize explicitly labeled Net Quantity / Weight / Volume lines
   const labeledQtyRegex = new RegExp(
-    `(?:net\\s*(?:qty|quantity|wt|weight|vol|volume|content\\.?)|n\\.?\\s*w\\.?|quantity|weight|volume|qty)\\s*[:\\-]?\\s*(\\d+(?:\\.\\d+)?)\\s*${unitPattern}\\b`,
+    `(?:net\\s*(?:qty|quantity|wt\\.?|weight|vol\\.?|volume|content\\.?)|n\\.?\\s*w\\.?|quantity|weight|volume|qty)[:\\-\\.]?\\s*(\\d+(?:\\.\\d+)?)\\s*${unitPattern}${boundary}`,
     'i'
   );
   const labeledMatch = cleanedText.match(labeledQtyRegex);
@@ -236,7 +287,7 @@ export function extractNetQuantity(text) {
   }
 
   // 2. Fallback: scan lines for standalone SI unit quantity while skipping nutrition tables & USP rates
-  const standaloneQtyRegex = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${unitPattern}\\b`, 'i');
+  const standaloneQtyRegex = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*${unitPattern}${boundary}`, 'i');
   const nutritionOrRateRegex = /\b(?:per\s*100|serving|energy|protein|carbohydrate|carbs|sugar|fat|saturated|trans|cholesterol|fibre|fiber|sodium|calcium|iron|vitamin|kcal|rda|unit\s*sale\s*price|usp)\b|(?:per|\/)\s*(?:100\s*g|100\s*ml|kg|g|gm|ml|l)\b/i;
 
   const lines = cleanedText.split('\n').map(l => l.trim()).filter(Boolean);
@@ -260,6 +311,7 @@ export function extractNetQuantity(text) {
 /**
  * Extracts Manufacturer / Packer details from text
  * Filters out statutory FSSAI and telephone noise and stops before adjacent declarations.
+ * Supports prefixes (Mfd by, Packed by, Factory) and company suffixes (Pvt. Ltd., Limited, LLP, Industries).
  * @param {string} text
  * @returns {Object} { value, originalValue, confidence }
  */
@@ -268,13 +320,14 @@ export function extractManufacturer(text) {
     return { value: null, originalValue: null, confidence: 0 };
   }
 
-  const mfgRegex = /(?:(?:manufactured|mfd\.?|marketed|mktd\.?|packed|pkd\.?|imported|distributed)(?:\s*(?:&|and|\/|,)\s*(?:manufactured|mfd\.?|marketed|mktd\.?|packed|pkd\.?|imported|distributed))*\s*by|(?:manufacturer|packer|importer|regd\.?\s*office))[:\-]?\s*([^\n]+(?:\n[^\n]+){0,2})/i;
-  const match = text.match(mfgRegex);
+  // 1. Explicit statutory manufacturer/packer prefixes
+  const mfgPrefixRegex = /(?:(?:manufactured|mfd\.?|marketed|mktd\.?|packed|pkd\.?|imported|distributed|bottled|blended)(?:\s*(?:&|and|\/|,)\s*(?:manufactured|mfd\.?|marketed|mktd\.?|packed|pkd\.?|imported|distributed|bottled|blended))*\s*(?:by|at)|(?:manufacturer|packer|importer|factory(?:\s*address)?|regd\.?\s*(?:office|off\.?)))[:\-]?\s*([^\n]+(?:\n[^\n]+){0,2})/i;
+  const match = text.match(mfgPrefixRegex);
+
+  const stopLineRegex = /^(?:country\s*of\s*origin|made\s*in|consumer\s*care|customer\s*care|toll\s*free|helpline|m\.?\s*r\.?\s*p|maximum\s*retail|net\s*(?:qty|quantity|wt|weight|vol)|best\s*before|use\s*by|date\s*of|mfg\s*date|pkd\s*date|unit\s*sale\s*price|usp|fssai\s*lic)/i;
 
   if (match && match[1]) {
     const rawLines = match[1].split('\n').map(l => l.trim()).filter(Boolean);
-    const stopLineRegex = /^(?:country\s*of\s*origin|made\s*in|consumer\s*care|customer\s*care|toll\s*free|helpline|m\.?\s*r\.?\s*p|maximum\s*retail|net\s*(?:qty|quantity|wt|weight|vol)|best\s*before|use\s*by|date\s*of|mfg|pkd|unit\s*sale\s*price|usp|fssai\s*lic)/i;
-
     const keptLines = [];
     for (const line of rawLines) {
       if (stopLineRegex.test(line)) break;
@@ -286,8 +339,39 @@ export function extractManufacturer(text) {
       return {
         value: rawVal,
         originalValue: match[0].trim(),
-        confidence: 0.90,
+        confidence: 0.92,
       };
+    }
+  }
+
+  // 2. Fallback: Search for corporate entities with standard company suffixes
+  // (Pvt. Ltd., Private Limited, Limited, Ltd., LLP, Industries)
+  const companySuffixRegex = /\b([A-Z0-9&][A-Za-z0-9&.,'\-\s]{1,60}?\b(?:Pvt\.?\s*Ltd\.?|Private\s*Limited|Limited|Ltd\.?|LLP|Industries))\b/i;
+  const nonCompanyFilter = /\b(?:limited\s*(?:offer|edition|time|period|stock|warranty)|nutrition|ingredients|directions|storage|instructions|serving)\b/i;
+
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (stopLineRegex.test(line) || nonCompanyFilter.test(line)) continue;
+
+    const compMatch = line.match(companySuffixRegex);
+    if (compMatch && compMatch[1]) {
+      const compName = compMatch[1].trim();
+      if (compName.length >= 4 && /[a-zA-Z]{3,}/.test(compName)) {
+        let fullVal = line.replace(/^[:\-,\s]+/, '').trim();
+        if (fullVal === compName && i + 1 < lines.length) {
+          const nextLine = lines[i + 1];
+          if (!stopLineRegex.test(nextLine) && !nonCompanyFilter.test(nextLine) && !/mrp|net\s*qty/i.test(nextLine)) {
+            fullVal = `${compName}, ${nextLine}`;
+          }
+        }
+
+        return {
+          value: fullVal,
+          originalValue: fullVal,
+          confidence: 0.90,
+        };
+      }
     }
   }
 

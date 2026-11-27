@@ -16,6 +16,11 @@ import {
   evaluateOcrSharpenRetry,
   preprocessImage,
 } from '../imageProcessing/imagePreprocessor.js';
+import {
+  extractMRP,
+  extractManufacturer,
+  extractNetQuantity,
+} from '../ocr/realOcrParser.js';
 
 let passed = 0;
 let failed = 0;
@@ -220,6 +225,54 @@ export async function runStabilizationTestSuite() {
   assert(evalDiscovered.extractedData.netQuantity.confidence === 0.88, 'OCR retry retains confidence of discovered declaration');
   assert(evalDiscovered.extractedData.netQuantity.boundingBox?.x0 === 20, 'OCR retry preserves bounding box for visual evidence mapping');
   assert(evalDiscovered.sharpenRetryImproved === true, 'sharpenRetryImproved flag accurately set to true');
+
+  console.log('\n[3] Testing BUG-03 Real OCR Parser Improvements');
+
+  // Test 15: Multi-line MRP lookahead with intervening packaging lines
+  const mrpMulti1 = extractMRP('MRP (INCL. OF ALL TAXES)\nBATCH: B-104\nRs. 150.00');
+  assert(mrpMulti1.packageMRP === '₹150.00' && mrpMulti1.confidence === 0.95, 'Multi-line MRP pairs with price across intervening batch line (₹150.00)');
+
+  const mrpMulti2 = extractMRP('MAXIMUM RETAIL PRICE\n(Inclusive of all taxes)\n₹ 299.00');
+  assert(mrpMulti2.packageMRP === '₹299.00' && mrpMulti2.confidence === 0.95, 'Multi-line MRP pairs across separate tax clause line (₹299.00)');
+
+  const mrpMulti3 = extractMRP('MRP:\n(INCL. OF ALL TAXES)\nRs 45');
+  assert(mrpMulti3.packageMRP === '₹45' && mrpMulti3.confidence === 0.95, 'Multi-line MRP pairs across 2 lines with colon prefix (₹45)');
+
+  // Test 16: Multi-line MRP lookahead skips discount line to pick true printed price
+  const mrpDiscount = extractMRP('MRP (INCL OF TAXES)\n50% off on MRP\nRs 180');
+  assert(mrpDiscount.packageMRP === '₹180', 'Multi-line MRP lookahead skips discount percentage line to capture genuine price');
+
+  // Test 17: Manufacturer extraction with company suffixes
+  const mfgSuffix1 = extractManufacturer('Britannia Industries Ltd., 5/1A Hungerford Street, Kolkata');
+  assert(mfgSuffix1.value && mfgSuffix1.value.includes('Britannia Industries Ltd.') && mfgSuffix1.confidence >= 0.90, 'Extracts corporate entity with "Industries Ltd." suffix');
+
+  const mfgSuffix2 = extractManufacturer('Marico Limited, Grande Palladium, Mumbai');
+  assert(mfgSuffix2.value && mfgSuffix2.value.includes('Marico Limited') && mfgSuffix2.confidence >= 0.90, 'Extracts corporate entity with "Limited" suffix');
+
+  const mfgSuffix3 = extractManufacturer('Hector Beverages Pvt. Ltd., Plot 11, Manesar');
+  assert(mfgSuffix3.value && mfgSuffix3.value.includes('Hector Beverages Pvt. Ltd.') && mfgSuffix3.confidence >= 0.90, 'Extracts corporate entity with "Pvt. Ltd." suffix');
+
+  // Test 18: Manufacturer extraction with common prefixes
+  const mfgPrefix1 = extractManufacturer('Factory: Plot 12, GIDC, Rajkot, Gujarat');
+  assert(mfgPrefix1.value && mfgPrefix1.value.includes('Plot 12, GIDC') && mfgPrefix1.confidence >= 0.90, 'Extracts manufacturing facility with "Factory:" prefix');
+
+  const mfgPrefix2 = extractManufacturer('Packed by: Tata Consumer Products Limited, Bangalore');
+  assert(mfgPrefix2.value && mfgPrefix2.value.includes('Tata Consumer Products Limited') && mfgPrefix2.confidence >= 0.90, 'Extracts packer with "Packed by:" prefix');
+
+  // Test 19: Rejects promotional text without false positive
+  const mfgPromo = extractManufacturer('Limited offer! Buy 1 Get 1 Free while stocks last.');
+  assert(mfgPromo.value === null, 'Promotional "Limited offer" does NOT falsely trigger manufacturer extraction');
+
+  // Test 20: Unspaced Net Quantity extraction
+  assert(extractNetQuantity('50g').value === '50 g', 'Extracts unspaced "50g" as "50 g"');
+  assert(extractNetQuantity('1kg').value === '1 kg', 'Extracts unspaced "1kg" as "1 kg"');
+  assert(extractNetQuantity('500ml').value === '500 ml', 'Extracts unspaced "500ml" as "500 ml"');
+  assert(extractNetQuantity('250ml').value === '250 ml', 'Extracts unspaced "250ml" as "250 ml"');
+  assert(extractNetQuantity('100g').value === '100 g', 'Extracts unspaced "100g" as "100 g"');
+  assert(extractNetQuantity('2L').value === '2 L', 'Extracts unspaced "2L" as "2 L"');
+  assert(extractNetQuantity('750ml').value === '750 ml', 'Extracts unspaced "750ml" as "750 ml"');
+  assert(extractNetQuantity('NET WT.50g').value === '50 g', 'Extracts unspaced labeled "NET WT.50g" as "50 g"');
+  assert(extractNetQuantity('100ge').value === '100 g', 'Extracts unspaced with estimated sign "100ge" as "100 g"');
 
   console.log(`\n============================================================`);
   console.log(` Stabilization Test Execution Complete: ${passed} Passed, ${failed} Failed`);
