@@ -124,14 +124,38 @@ export function validatePhone(rawValue, parsedDetails = null) {
   const presence = validatePresence(rawValue);
   if (!presence.isValid) return presence;
 
-  const str = String(rawValue);
-  const hasPhone = parsedDetails?.phone || /(?:1[89]00[-\s]?\d{3,4}[-\s]?\d{3,4})|(?:\+?91[-\s]?)?\d{8,11}|helpline|consumer|care|contact/i.test(str);
-
-  if (!hasPhone) {
-    return { isValid: false, reason: 'Consumer care helpline phone number / toll-free 1800 number not detected' };
+  const str = String(rawValue).trim();
+  if (parsedDetails?.phone) {
+    return { isValid: true, reason: 'Consumer care contact helpline number detected' };
   }
 
-  return { isValid: true, reason: 'Consumer care contact helpline number detected' };
+  // Consumer care email contact (Legal Metrology Rule 6(1)(h))
+  if (/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(str)) {
+    return { isValid: true, reason: 'Consumer care contact helpline number detected' };
+  }
+
+  // Direct normalized check (when rawValue is primarily the contact number)
+  const clean = str.replace(/[\s\-\(\)\.:\/]/g, '');
+  const isCleanTollFree = /^1[89]\d{2}\d{6,7}$/.test(clean);
+  const isCleanMobile = /^(?:\+?91|0)?[6-9]\d{9}$/.test(clean);
+  const isCleanLandline = /^0\d{9,10}$/.test(clean);
+  const isCleanMasked = /^1[89]00[xX\d]{6,7}$/i.test(clean);
+
+  if (isCleanTollFree || isCleanMobile || isCleanLandline || isCleanMasked) {
+    return { isValid: true, reason: 'Consumer care contact helpline number detected' };
+  }
+
+  // Embedded phone pattern check (when rawValue contains descriptive label + phone)
+  const hasEmbeddedTollFree = /(?:1[89]00|1860)(?:[-\s.]?\d){6,7}\b/.test(str);
+  const hasEmbeddedMobile = /(?:\+?91[-\s.]?|0)?[6-9](?:[-\s.]?\d){9}\b/.test(str);
+  const hasEmbeddedLandline = /\b0\d{2,4}[-\s.]\d{6,8}\b/.test(str);
+  const hasEmbeddedMasked = /(?:1[89]00|1860)[-\s.]?(?:[xX\d][-\s.]?){6,7}\b/i.test(str);
+
+  if (hasEmbeddedTollFree || hasEmbeddedMobile || hasEmbeddedLandline || hasEmbeddedMasked) {
+    return { isValid: true, reason: 'Consumer care contact helpline number detected' };
+  }
+
+  return { isValid: false, reason: 'Consumer care helpline phone number / toll-free 1800 number not detected' };
 }
 
 /**

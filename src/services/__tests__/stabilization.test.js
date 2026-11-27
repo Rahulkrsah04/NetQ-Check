@@ -61,6 +61,8 @@ import {
   performStorageLruEviction,
   StorageAdapter,
 } from '../repositories/storageAdapter.js';
+import { validatePhone } from '../validators/reusableValidators.js';
+import { runComplianceCheck } from '../complianceEngine.js';
 
 let passed = 0;
 let failed = 0;
@@ -445,6 +447,63 @@ export async function runStabilizationTestSuite() {
   assert(didCrash === false, 'StorageAdapter.save catches QuotaExceededError without crashing');
   assert(savedItem && savedItem.id === 'TEST-QUOTA-01', 'StorageAdapter.save recovers and returns saved item');
   assert(writeAttempts >= 2, 'StorageAdapter retried write after handling quota overflow');
+
+  console.log('\n[7] Testing Phase 6D Consumer Care Phone Validation & Real-World Compliance');
+
+  // Test 35: Validates multi-hyphen toll-free number 1800-10-22-221
+  const phoneRes1 = validatePhone('1800-10-22-221');
+  assert(phoneRes1.isValid === true, 'Validates multi-hyphen toll-free number 1800-10-22-221');
+
+  // Test 36: Validates standard 1800-425-4444
+  const phoneRes2 = validatePhone('1800-425-4444');
+  assert(phoneRes2.isValid === true, 'Validates standard toll-free number 1800-425-4444');
+
+  // Test 37: Validates standard 1800-233-9999
+  const phoneRes3 = validatePhone('1800-233-9999');
+  assert(phoneRes3.isValid === true, 'Validates standard toll-free number 1800-233-9999');
+
+  // Test 38: Validates +91 formatted numbers (spaced, hyphenated, direct)
+  const phoneRes4 = validatePhone('+91 98765 43210');
+  assert(phoneRes4.isValid === true, 'Validates +91 spaced Indian mobile number (+91 98765 43210)');
+
+  const phoneRes5 = validatePhone('+91-98765-43210');
+  assert(phoneRes5.isValid === true, 'Validates +91 hyphenated Indian mobile number (+91-98765-43210)');
+
+  // Test 39: Rejects invalid short numbers
+  const shortRes1 = validatePhone('1800');
+  assert(shortRes1.isValid === false, 'Rejects incomplete/short toll-free prefix ("1800")');
+
+  const shortRes2 = validatePhone('12345');
+  assert(shortRes2.isValid === false, 'Rejects invalid short numeric input ("12345")');
+
+  // Test 40: Rejects invalid alphabetic input without contact digits
+  const alphaRes1 = validatePhone('call us today');
+  assert(alphaRes1.isValid === false, 'Rejects arbitrary alphabetic input without contact digits ("call us today")');
+
+  const alphaRes2 = validatePhone('customer care');
+  assert(alphaRes2.isValid === false, 'Rejects generic keyword text without phone digits ("customer care")');
+
+  // Test 41: Validates landline with STD prefix and email formats
+  const landlineRes = validatePhone('Care: 0281-223344');
+  assert(landlineRes.isValid === true, 'Validates landline / STD format with keyword prefix ("Care: 0281-223344")');
+
+  const emailRes = validatePhone('feedback@britindia.com');
+  assert(emailRes.isValid === true, 'Validates consumer care email address ("feedback@britindia.com")');
+
+  // Test 42: Real-World Clinic Plus Health Shampoo compliance verification
+  const shampooInput = {
+    productName: { value: 'Clinic Plus Strong & Long Health Shampoo', confidence: 0.95 },
+    netQuantity: { value: '6.5 ml', confidence: 0.95 },
+    mrp: { value: '₹2.00 (Inclusive of all taxes)', confidence: 0.95 },
+    manufacturer: { value: 'Hindustan Unilever Limited, Mumbai 400099', confidence: 0.95 },
+    manufactureDate: { value: '01/2026', confidence: 0.90 },
+    consumerCare: { value: '1800-10-22-221', confidence: 0.95 },
+    batchNumber: { value: 'B.No. CP2601', confidence: 0.95 },
+  };
+  const shampooCheck = runComplianceCheck({ extractedData: shampooInput, productCategory: 'PERSONAL_CARE' });
+  const careCheck = shampooCheck.checks.find(c => c.dataKey === 'consumerCare');
+  assert(careCheck && careCheck.status === 'PASS', 'Shampoo product with multi-hyphen 1800-10-22-221 passes REQ_06 consumer care validation');
+  assert(shampooCheck.overallStatus === 'COMPLIANT', 'Shampoo product achieves COMPLIANT status under Legal Metrology Rules');
 
   console.log(`\n============================================================`);
   console.log(` Stabilization Test Execution Complete: ${passed} Passed, ${failed} Failed`);
