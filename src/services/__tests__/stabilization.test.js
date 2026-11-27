@@ -3,6 +3,27 @@
 // Tests BUG-01 Scan Session Persistence & Navigation Safeguards
 // ============================================================
 
+// Safe polyfill for direct standalone execution under Node.js
+if (typeof localStorage === 'undefined' || localStorage === null) {
+  const store = {};
+  global.localStorage = {
+    getItem: (key) => store[key] || null,
+    setItem: (key, value) => { store[key] = value.toString(); },
+    removeItem: (key) => { delete store[key]; },
+    clear: () => { Object.keys(store).forEach(k => delete store[k]); },
+  };
+}
+
+if (typeof sessionStorage === 'undefined' || sessionStorage === null) {
+  const store = {};
+  global.sessionStorage = {
+    getItem: (key) => store[key] || null,
+    setItem: (key, value) => { store[key] = value.toString(); },
+    removeItem: (key) => { delete store[key]; },
+    clear: () => { Object.keys(store).forEach(k => delete store[k]); },
+  };
+}
+
 import {
   saveActiveScanSession,
   loadActiveScanSession,
