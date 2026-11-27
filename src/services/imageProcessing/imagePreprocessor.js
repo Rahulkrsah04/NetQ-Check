@@ -1,7 +1,7 @@
 // ============================================================
 // NetQ Check — Image Preprocessing Service
 // Non-destructive preprocessing pipeline using HTML5 Canvas
-// (Luminance Grayscale, Adaptive Contrast Stretch, Dimension Scaling)
+// (Luminance Grayscale, Adaptive Contrast Stretch, Controlled 3x3 Sharpening, Dimension Scaling)
 // ============================================================
 
 /**
@@ -130,6 +130,131 @@ export function applyAdaptiveContrastStretching(imageData, lowPercentile = 0.01,
 }
 
 /**
+ * Applies a controlled 3x3 sharpening convolution filter to enhance stroke contrast
+ * for blurry or soft packaging label text without amplifying high-frequency noise.
+ * Uses a normalized high-pass Laplacian unsharp mask kernel:
+ * [  0,  -a,   0 ]
+ * [ -a, 1+4a, -a ]
+ * [  0,  -a,   0 ]
+ * Flat uniform regions are mathematically invariant.
+ * @param {ImageData} imageData - Canvas ImageData object
+ * @param {number} [strength=0.7] - Sharpening intensity factor (clamped between 0.1 and 1.5)
+ * @returns {ImageData} Same ImageData modified in-place
+ */
+export function applySharpeningFilter(imageData, strength = 0.7) {
+  if (!imageData || !imageData.data) return imageData;
+  const { width, height, data } = imageData;
+  if (!width || !height || width < 3 || height < 3) return imageData;
+
+  // Clone pixel buffer to preserve pristine neighborhood values during convolution
+  const src = new Uint8ClampedArray(data);
+  const alpha = Math.max(0.1, Math.min(1.5, Number(strength) || 0.7));
+  const centerCoeff = 1 + 4 * alpha;
+
+  for (let y = 1; y < height - 1; y++) {
+    const rowOffset = y * width;
+    const prevRowOffset = (y - 1) * width;
+    const nextRowOffset = (y + 1) * width;
+
+    for (let x = 1; x < width - 1; x++) {
+      const idx = (rowOffset + x) * 4;
+      const idxLeft = (rowOffset + x - 1) * 4;
+      const idxRight = (rowOffset + x + 1) * 4;
+      const idxUp = (prevRowOffset + x) * 4;
+      const idxDown = (nextRowOffset + x) * 4;
+
+      // Apply to R, G, B channels
+      for (let c = 0; c < 3; c++) {
+        const center = src[idx + c];
+        const left = src[idxLeft + c];
+        const right = src[idxRight + c];
+        const up = src[idxUp + c];
+        const down = src[idxDown + c];
+
+        const val = centerCoeff * center - alpha * (left + right + up + down);
+        data[idx + c] = Math.max(0, Math.min(255, Math.round(val)));
+      }
+      // data[idx + 3] (alpha) remains untouched
+    }
+  }
+
+  return imageData;
+}
+
+/**
+ * Intelligently evaluates and merges OCR retry results from a sharpened image pass.
+ * Compares declaration presence and field confidences without blindly overwriting
+ * higher-confidence original extractions. Preserves source image IDs and bounding boxes.
+ * @param {Object} originalResult - Baseline OCR result from initial pass
+ * @param {Object} retryResult - OCR result from sharpened retry pass
+ * @returns {Object} Best-effort fused OCR result
+ */
+export function evaluateOcrSharpenRetry(originalResult, retryResult) {
+  if (!retryResult || !retryResult.success || !retryResult.extractedData) {
+    return originalResult;
+  }
+  if (!originalResult || !originalResult.success || !originalResult.extractedData) {
+    return retryResult;
+  }
+
+  const isValidVal = (val) => Boolean(
+    val && typeof val === 'string' && val.trim().length > 0 && !val.toLowerCase().includes('not detected')
+  );
+
+  const mergedExtracted = { ...originalResult.extractedData };
+  let retryImprovedField = false;
+
+  const allKeys = Array.from(new Set([
+    ...Object.keys(originalResult.extractedData),
+    ...Object.keys(retryResult.extractedData),
+  ]));
+
+  for (const key of allKeys) {
+    const origField = originalResult.extractedData[key];
+    const retryField = retryResult.extractedData[key];
+
+    const origValid = origField && isValidVal(origField.value);
+    const retryValid = retryField && isValidVal(retryField.value);
+
+    if (!origValid && retryValid) {
+      // Retry discovered a previously missing declaration
+      mergedExtracted[key] = {
+        ...retryField,
+        source: retryField.source || origField?.source || 'Sharpened OCR Pass',
+      };
+      retryImprovedField = true;
+    } else if (origValid && retryValid) {
+      const origConf = origField.confidence || 0;
+      const retryConf = retryField.confidence || 0;
+
+      // Only adopt retry if its confidence is noticeably higher (>= 0.05 margin)
+      if (retryConf > origConf + 0.05) {
+        mergedExtracted[key] = {
+          ...retryField,
+          source: retryField.source || origField.source,
+        };
+        retryImprovedField = true;
+      }
+      // Otherwise keep higher-confidence original field
+    }
+  }
+
+  const origTextLen = (originalResult.rawText || '').trim().length;
+  const retryTextLen = (retryResult.rawText || '').trim().length;
+  const primaryRawText = (retryImprovedField && retryTextLen > origTextLen)
+    ? retryResult.rawText
+    : originalResult.rawText;
+
+  return {
+    ...originalResult,
+    extractedData: mergedExtracted,
+    rawText: primaryRawText,
+    sharpenRetryEvaluated: true,
+    sharpenRetryImproved: retryImprovedField,
+  };
+}
+
+/**
  * Preprocesses an image using HTML5 Canvas to improve OCR readability
  * Non-destructive: preserves original image reference, generates processed Blob for OCR.
  * @param {File|Blob|string|Object} originalImage - Original image input
@@ -141,8 +266,24 @@ export async function preprocessImage(originalImage, options = {}) {
     grayscale: true,
     contrastEnhance: true,
     maxDimension: 2000,
+    sharpen: 'auto', // 'auto' | true | false
+    sharpenStrength: 0.7,
+    blurScore: null,
+    laplacianVariance: null,
+    quality: null,
     ...options,
   };
+
+  const isBlurDetected =
+    (typeof defaultOptions.blurScore === 'number' && defaultOptions.blurScore < 70) ||
+    (typeof defaultOptions.laplacianVariance === 'number' && defaultOptions.laplacianVariance < 90) ||
+    (defaultOptions.quality?.metrics?.blurScore != null && defaultOptions.quality.metrics.blurScore < 70) ||
+    (defaultOptions.quality?.metrics?.laplacianVariance != null && defaultOptions.quality.metrics.laplacianVariance < 90) ||
+    (Array.isArray(defaultOptions.quality?.flags) && defaultOptions.quality.flags.some(f => typeof f === 'string' && f.toLowerCase().includes('blur')));
+
+  const shouldSharpen =
+    defaultOptions.sharpen === true ||
+    (defaultOptions.sharpen === 'auto' && isBlurDetected);
 
   // Determine original reference representation (for UI and metadata)
   let originalRef = 'image_sample.png';
@@ -170,7 +311,9 @@ export async function preprocessImage(originalImage, options = {}) {
         filtersApplied: [
           defaultOptions.grayscale ? 'Luminance Grayscale' : null,
           defaultOptions.contrastEnhance ? 'Adaptive Contrast Stretch' : null,
+          shouldSharpen ? `Controlled 3x3 Sharpening Filter (strength: ${defaultOptions.sharpenStrength})` : null,
         ].filter(Boolean),
+        isSharpened: Boolean(shouldSharpen),
         processedAt: new Date().toISOString(),
       },
     };
@@ -232,7 +375,17 @@ export async function preprocessImage(originalImage, options = {}) {
         filtersApplied.push('Adaptive Contrast Stretch (1-99 percentile)');
       }
 
+      if (shouldSharpen) {
+        applySharpeningFilter(imageData, defaultOptions.sharpenStrength);
+        filtersApplied.push(`Controlled 3x3 Sharpening Filter (strength: ${defaultOptions.sharpenStrength})`);
+      }
+
       filtersApplied.push('Luminance Grayscale (ITU-R BT.601)');
+      ctx.putImageData(imageData, 0, 0);
+    } else if (shouldSharpen) {
+      const imageData = ctx.getImageData(0, 0, width, height);
+      applySharpeningFilter(imageData, defaultOptions.sharpenStrength);
+      filtersApplied.push(`Controlled 3x3 Sharpening Filter (strength: ${defaultOptions.sharpenStrength})`);
       ctx.putImageData(imageData, 0, 0);
     }
 
@@ -258,6 +411,7 @@ export async function preprocessImage(originalImage, options = {}) {
         width,
         height,
         scale,
+        isSharpened: Boolean(shouldSharpen),
         filtersApplied,
         processedAt: new Date().toISOString(),
       },

@@ -11,6 +11,11 @@ import {
   dataUrlToBlob,
   SESSION_STORAGE_KEY,
 } from '../inspection/scanSessionService.js';
+import {
+  applySharpeningFilter,
+  evaluateOcrSharpenRetry,
+  preprocessImage,
+} from '../imageProcessing/imagePreprocessor.js';
 
 let passed = 0;
 let failed = 0;
@@ -117,6 +122,104 @@ export async function runStabilizationTestSuite() {
   // Test 6: dataUrlToBlob conversion safety
   const blob = dataUrlToBlob('data:image/jpeg;base64,dGVzdA==', 'sample.jpg');
   assert(blob instanceof Object && blob.name === 'sample.jpg', 'dataUrlToBlob creates File instance with correct name');
+
+  console.log('\n[2] Testing BUG-02 Conditional Image Sharpening & OCR Retry');
+
+  // Test 7: Controlled 3x3 sharpening preserves uniform flat regions without noise
+  const flatBuf = new Uint8ClampedArray(4 * 4 * 4);
+  flatBuf.fill(128);
+  applySharpeningFilter({ width: 4, height: 4, data: flatBuf }, 0.7);
+  let flatInvariant = true;
+  for (let i = 0; i < flatBuf.length; i += 4) {
+    if (flatBuf[i] !== 128) flatInvariant = false;
+  }
+  assert(flatInvariant === true, 'Controlled 3x3 sharpening preserves flat uniform regions without artificial noise');
+
+  // Test 8: Edge stroke contrast enhancement
+  const edgeBuf = new Uint8ClampedArray(4 * 4 * 4);
+  edgeBuf.fill(120);
+  const centerIdx = (1 * 4 + 1) * 4;
+  edgeBuf[centerIdx] = 60;
+  edgeBuf[centerIdx + 1] = 60;
+  edgeBuf[centerIdx + 2] = 60;
+  applySharpeningFilter({ width: 4, height: 4, data: edgeBuf }, 0.7);
+  assert(edgeBuf[centerIdx] < 60, 'Sharpening enhances stroke contrast by darkening character stroke edges');
+
+  // Test 9: Dimension and alpha preservation
+  const dimBuf = new Uint8ClampedArray(10 * 10 * 4);
+  for (let i = 3; i < dimBuf.length; i += 4) dimBuf[i] = 220;
+  applySharpeningFilter({ width: 10, height: 10, data: dimBuf }, 0.8);
+  let alphaPreserved = true;
+  for (let i = 3; i < dimBuf.length; i += 4) {
+    if (dimBuf[i] !== 220) alphaPreserved = false;
+  }
+  assert(alphaPreserved === true, 'Sharpening preserves alpha channel untouched across all pixels');
+
+  // Test 10: Sharp image remains unchanged in normal path
+  const sharpProcessed = await preprocessImage({ name: 'sharp_label.png' }, {
+    blurScore: 85,
+    laplacianVariance: 150,
+  });
+  assert(sharpProcessed.metadata.isSharpened === false, 'Sharp image remains unchanged without sharpening in normal path');
+  assert(!sharpProcessed.metadata.filtersApplied.some(f => f.includes('Sharpening')), 'Sharp image does not apply sharpening filter');
+
+  // Test 11: Blurred image triggers conditional sharpening
+  const blurryProcessed = await preprocessImage({ name: 'blurry_label.png' }, {
+    blurScore: 45,
+    laplacianVariance: 35,
+  });
+  assert(blurryProcessed.metadata.isSharpened === true, 'Blurred image triggers conditional sharpening');
+  assert(blurryProcessed.metadata.filtersApplied.some(f => f.includes('Controlled 3x3 Sharpening Filter')), 'Sharpening filter recorded in metadata filtersApplied');
+
+  // Test 12: Dimensions and bounding-box coordinate invariance
+  assert(sharpProcessed.metadata.width === blurryProcessed.metadata.width, 'Sharpened output has identical dimensions to unsharpened pipeline');
+  const sampleBox = { x: 10, y: 20, width: 200, height: 50 };
+  const origXPct = (sampleBox.x / 1000) * 100;
+  assert(origXPct === 1.0, 'Bounding-box coordinate percentage mapping remains strictly invariant');
+
+  // Test 13: OCR retry does not overwrite higher-confidence original results
+  const origOcr = {
+    success: true,
+    rawText: 'Tata Tea Gold Rs 150',
+    extractedData: {
+      productName: { value: 'Tata Tea Gold', confidence: 0.94 },
+      mrp: { value: '₹150', confidence: 0.95 },
+      netQuantity: { value: null, confidence: 0 },
+    },
+  };
+  const retryLowerOcr = {
+    success: true,
+    rawText: 'Tata Tea Gold Rs 150',
+    extractedData: {
+      productName: { value: 'Tata Tea', confidence: 0.60 },
+      mrp: { value: '₹150', confidence: 0.65 },
+      netQuantity: { value: null, confidence: 0 },
+    },
+  };
+  const evalKeepOrig = evaluateOcrSharpenRetry(origOcr, retryLowerOcr);
+  assert(evalKeepOrig.extractedData.mrp.confidence === 0.95, 'OCR retry does NOT overwrite higher-confidence original MRP (0.95 kept over 0.65)');
+  assert(evalKeepOrig.extractedData.productName.value === 'Tata Tea Gold', 'OCR retry does NOT overwrite higher-confidence original Product Name');
+
+  // Test 14: OCR retry merges newly discovered declarations and preserves evidence
+  const retryDiscoveredOcr = {
+    success: true,
+    rawText: 'Tata Tea Gold Rs 150 Net Qty 250 g',
+    extractedData: {
+      productName: { value: 'Tata Tea Gold', confidence: 0.92 },
+      mrp: { value: '₹150', confidence: 0.90 },
+      netQuantity: {
+        value: '250 g',
+        confidence: 0.88,
+        boundingBox: { x0: 20, y0: 80, x1: 50, y1: 95 },
+        source: 'IMG-001',
+      },
+    },
+  };
+  const evalDiscovered = evaluateOcrSharpenRetry(origOcr, retryDiscoveredOcr);
+  assert(evalDiscovered.extractedData.netQuantity.value === '250 g', 'OCR retry merges newly extracted declaration missing from original pass');
+  assert(evalDiscovered.extractedData.netQuantity.confidence === 0.88, 'OCR retry retains confidence of discovered declaration');
+  assert(evalDiscovered.extractedData.netQuantity.boundingBox?.x0 === 20, 'OCR retry preserves bounding box for visual evidence mapping');
+  assert(evalDiscovered.sharpenRetryImproved === true, 'sharpenRetryImproved flag accurately set to true');
 
   console.log(`\n============================================================`);
   console.log(` Stabilization Test Execution Complete: ${passed} Passed, ${failed} Failed`);

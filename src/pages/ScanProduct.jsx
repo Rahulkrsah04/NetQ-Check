@@ -9,7 +9,7 @@ import { useOCR } from '../hooks/useOCR';
 import { PRODUCT_CATEGORIES, detectCategoryFromText } from '../services/ruleEngine/productCategories';
 import { findMatchingProducts } from '../services/products/productMatcher';
 import { analyzeImageQuality } from '../services/imageProcessing/imageQualityAnalyzer';
-import { preprocessImage } from '../services/imageProcessing/imagePreprocessor';
+import { preprocessImage, evaluateOcrSharpenRetry } from '../services/imageProcessing/imagePreprocessor';
 import { detectBarcodes } from '../services/barcode/barcodeService';
 import { fuseMultiImageScan } from '../services/inspection/dataFusionService';
 import { attachVisualEvidence, calculateEvidenceCoverage } from '../services/evidence/evidenceMapperService';
@@ -205,9 +205,18 @@ export default function ScanProduct() {
           fileName: img.fileName,
         };
 
-        // 1. Run genuine Canvas Preprocessing BEFORE OCR
+        const isBlurry = img.quality?.metrics?.blurScore < 70 ||
+          img.quality?.metrics?.laplacianVariance < 90 ||
+          (Array.isArray(img.quality?.flags) && img.quality.flags.some(f => typeof f === 'string' && f.toLowerCase().includes('blur')));
+
+        // 1. Run genuine Canvas Preprocessing BEFORE OCR (conditionally sharpens if blur detected)
         try {
-          preprocessedInfo = await preprocessImage(img.file);
+          preprocessedInfo = await preprocessImage(img.file, {
+            grayscale: true,
+            contrastEnhance: true,
+            sharpen: 'auto',
+            quality: img.quality,
+          });
           if (preprocessedInfo?.processedBlob) {
             ocrTarget = preprocessedInfo.processedBlob;
             img.preprocessed = preprocessedInfo;
@@ -225,6 +234,36 @@ export default function ScanProduct() {
           const origRes = await startScan(img.file, false, imgMeta);
           if (origRes && (origRes.rawText || '').trim().length > (res?.rawText || '').trim().length) {
             res = origRes;
+          }
+        }
+
+        // 3. OCR Sharpening Retry Pass (BUG-02):
+        // If image was blurry or important declarations were missing and first pass wasn't sharpened,
+        // evaluate a sharpened image pass and compare field-by-field.
+        if (!img.isDemoPreset && res?.success) {
+          const criticalMissing = !res.extractedData?.mrp?.value ||
+            !res.extractedData?.netQuantity?.value ||
+            !res.extractedData?.manufacturer?.value;
+          const lowConfidence = (res.extractedData?.productName?.confidence || 1) < 0.65;
+
+          if ((isBlurry || lowConfidence || criticalMissing) && !preprocessedInfo?.metadata?.isSharpened) {
+            try {
+              const sharpenedPrep = await preprocessImage(img.file, {
+                grayscale: true,
+                contrastEnhance: true,
+                sharpen: true,
+                sharpenStrength: 0.85,
+              });
+
+              if (sharpenedPrep?.processedBlob) {
+                const retryRes = await startScan(sharpenedPrep.processedBlob, false, imgMeta);
+                if (retryRes?.success) {
+                  res = evaluateOcrSharpenRetry(res, retryRes);
+                }
+              }
+            } catch (retryErr) {
+              console.warn('Sharpened OCR retry pass skipped:', retryErr);
+            }
           }
         }
 
