@@ -79,28 +79,57 @@ export const SEED_SCANS = [
 
 const adapter = new StorageAdapter('scans', SEED_SCANS);
 
+/**
+ * Sanitizes scan image URLs to prevent broken image errors from expired blob URLs.
+ * @param {Array<string>} images
+ * @returns {Array<string>}
+ */
+export function sanitizeScanImages(images) {
+  if (!Array.isArray(images)) return [];
+  return images.filter(img => typeof img === 'string' && !img.startsWith('blob:'));
+}
+
 export function getAllScans() {
-  return adapter.getAll();
+  const scans = adapter.getAll();
+  return scans.map(s => ({
+    ...s,
+    images: sanitizeScanImages(s.images),
+  }));
 }
 
 export function getScanById(scanId) {
-  return adapter.getById('scanId', scanId);
+  const scan = adapter.getById('scanId', scanId);
+  if (!scan) return null;
+  return {
+    ...scan,
+    images: sanitizeScanImages(scan.images),
+  };
 }
 
 export function getScansByProductId(productId) {
-  return adapter.query(scan => String(scan.productId) === String(productId));
+  const scans = adapter.query(scan => String(scan.productId) === String(productId));
+  return scans.map(s => ({
+    ...s,
+    images: sanitizeScanImages(s.images),
+  }));
 }
 
 export function createScan(scanData, user = null) {
   const scanId = scanData.scanId || `SCN-${new Date().toISOString().slice(0,10).replace(/-/g,'')}-${Math.floor(Math.random() * 9000 + 1000)}`;
   
+  // Prefer persistent image URLs / Base64 data URLs over transient blob: URLs
+  const rawImages = Array.isArray(scanData.images) ? scanData.images : [];
+  const safeImages = rawImages
+    .map(img => (typeof img === 'string' && img.startsWith('blob:') ? null : img))
+    .filter(Boolean);
+
   const record = {
     scanId,
     productId: scanData.productId || null,
     userId: user?.uid || scanData.userId || 'USR-ANON',
     userName: user?.displayName || user?.email || scanData.userName || 'Inspector',
     userRole: user?.role || scanData.userRole || 'INSPECTOR',
-    images: scanData.images || [],
+    images: safeImages.length > 0 ? safeImages : rawImages,
     rawOCRData: scanData.rawOCRData || {},
     normalizedData: scanData.normalizedData || {},
     category: scanData.category || 'GENERAL_PREPACKED',

@@ -53,17 +53,44 @@ export const SEED_PRODUCTS = [
 
 const adapter = new StorageAdapter('products', SEED_PRODUCTS);
 
+/**
+ * Sanitizes image thumbnail URLs to prevent broken images from expired temporary blob URLs.
+ * Preserves persistent Base64 data URLs (data:image/...) and web URLs (http/https).
+ * @param {string|null} imageUrl
+ * @returns {string|null}
+ */
+export function getSafeThumbnailUrl(imageUrl) {
+  if (!imageUrl || typeof imageUrl !== 'string') return null;
+  // Blob URLs are tied to transient document lifecycles and expire upon page reload
+  if (imageUrl.startsWith('blob:')) return null;
+  return imageUrl;
+}
+
 export function getAllProducts() {
-  return adapter.getAll();
+  const products = adapter.getAll();
+  return products.map(p => ({
+    ...p,
+    image: getSafeThumbnailUrl(p.image),
+  }));
 }
 
 export function getProductById(productId) {
-  return adapter.getById('productId', productId);
+  const product = adapter.getById('productId', productId);
+  if (!product) return null;
+  return {
+    ...product,
+    image: getSafeThumbnailUrl(product.image),
+  };
 }
 
 export function saveProduct(productData, user = null) {
   const existing = productData.productId ? getProductById(productData.productId) : null;
   
+  // Prefer persistent Base64 previewDataUrl over transient blob: URL
+  const safeImage = (productData.image && !productData.image.startsWith('blob:'))
+    ? productData.image
+    : (productData.previewDataUrl || (existing ? existing.image : null));
+
   const id = productData.productId || `PRD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
   const productToSave = {
     productId: id,
@@ -72,7 +99,7 @@ export function saveProduct(productData, user = null) {
     categoryId: productData.categoryId || 'GENERAL_PREPACKED',
     manufacturer: productData.manufacturer || 'Unknown Manufacturer',
     brand: productData.brand || 'Unbranded',
-    image: productData.image || null,
+    image: safeImage,
     createdAt: existing ? existing.createdAt : new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastScannedAt: productData.lastScannedAt || new Date().toISOString(),

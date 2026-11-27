@@ -21,6 +21,15 @@ import {
   extractManufacturer,
   extractNetQuantity,
 } from '../ocr/realOcrParser.js';
+import {
+  getSafeThumbnailUrl,
+  saveProduct,
+  getProductById,
+} from '../repositories/productRepository.js';
+import {
+  sanitizeScanImages,
+  createScan,
+} from '../repositories/scanRepository.js';
 
 let passed = 0;
 let failed = 0;
@@ -273,6 +282,51 @@ export async function runStabilizationTestSuite() {
   assert(extractNetQuantity('750ml').value === '750 ml', 'Extracts unspaced "750ml" as "750 ml"');
   assert(extractNetQuantity('NET WT.50g').value === '50 g', 'Extracts unspaced labeled "NET WT.50g" as "50 g"');
   assert(extractNetQuantity('100ge').value === '100 g', 'Extracts unspaced with estimated sign "100ge" as "100 g"');
+
+  console.log('\n[4] Testing BUG-04 Persistent Image Thumbnails');
+
+  // Test 21: getSafeThumbnailUrl sanitization
+  assert(getSafeThumbnailUrl('blob:http://localhost:5173/3f9a-12bc') === null, 'getSafeThumbnailUrl strips expired transient blob URLs');
+  assert(getSafeThumbnailUrl('data:image/jpeg;base64,mockThumb123') === 'data:image/jpeg;base64,mockThumb123', 'getSafeThumbnailUrl preserves valid Base64 data URLs');
+  assert(getSafeThumbnailUrl('https://images.example.com/item.jpg') === 'https://images.example.com/item.jpg', 'getSafeThumbnailUrl preserves web URLs');
+  assert(getSafeThumbnailUrl(null) === null, 'getSafeThumbnailUrl handles null gracefully');
+  assert(getSafeThumbnailUrl('') === null, 'getSafeThumbnailUrl handles empty string gracefully');
+
+  // Test 22: saveProduct persists Base64 data URL
+  const base64Product = saveProduct({
+    productId: 'PRD-TEST-BASE64',
+    productName: 'Sample Product Base64',
+    image: 'data:image/png;base64,validBase64ImageContent',
+  });
+  assert(base64Product.image === 'data:image/png;base64,validBase64ImageContent', 'saveProduct stores persistent Base64 image thumbnail');
+
+  // Test 23: saveProduct prefers previewDataUrl when blob URL is passed
+  const blobProduct = saveProduct({
+    productId: 'PRD-TEST-BLOB',
+    productName: 'Sample Product Blob',
+    image: 'blob:http://localhost:5173/expired-blob-token',
+    previewDataUrl: 'data:image/jpeg;base64,safeSerializedPreview',
+  });
+  assert(blobProduct.image === 'data:image/jpeg;base64,safeSerializedPreview', 'saveProduct replaces transient blob URL with serialized previewDataUrl');
+
+  // Test 24: getProductById sanitizes legacy blob URL records
+  const legacyBlobProduct = saveProduct({
+    productId: 'PRD-TEST-LEGACY-BLOB',
+    productName: 'Legacy Expired Product',
+    image: 'blob:http://localhost:5173/old-expired-token',
+  });
+  const fetchedLegacy = getProductById('PRD-TEST-LEGACY-BLOB');
+  assert(fetchedLegacy.image === null, 'getProductById sanitizes legacy records with expired blob URLs to null');
+
+  // Test 25: sanitizeScanImages filters out blob URLs from scan records
+  const sanitized = sanitizeScanImages([
+    'blob:http://localhost:5173/transient-1',
+    'data:image/jpeg;base64,persistent-scan-thumbnail',
+    'https://example.com/scan.png',
+  ]);
+  assert(sanitized.length === 2, 'sanitizeScanImages removes transient blob URLs');
+  assert(sanitized[0] === 'data:image/jpeg;base64,persistent-scan-thumbnail', 'sanitizeScanImages preserves persistent Base64 scan thumbnail');
+  assert(sanitized[1] === 'https://example.com/scan.png', 'sanitizeScanImages preserves HTTPS scan image');
 
   console.log(`\n============================================================`);
   console.log(` Stabilization Test Execution Complete: ${passed} Passed, ${failed} Failed`);

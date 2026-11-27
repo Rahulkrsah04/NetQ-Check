@@ -391,16 +391,16 @@ export default function ScanProduct() {
         categoryId: selectedCategory,
         manufacturer: finalData.manufacturer?.value || 'Unknown Manufacturer',
         brand: finalData.productName?.value?.split(' ')[0] || 'Generic',
-        image: labelImages[0]?.preview,
+        image: labelImages[0]?.previewDataUrl || labelImages[0]?.preview,
         latestStatus: result.overallStatus,
         incrementScanCount: true,
       }, user);
     }
 
-    // Save Scan Record
+    // Save Scan Record (uses persistent Base64 previewDataUrls so history thumbnails never break)
     const scanRecord = createScan({
       productId: activeProduct.productId,
-      images: labelImages.map(img => img.preview),
+      images: labelImages.map(img => img.previewDataUrl || img.preview),
       rawOCRData: { text: combinedRawText || ocrResult?.rawText || 'Multi-Image Fusion OCR' },
       normalizedData: mappedWithEvidence,
       category: selectedCategory,
