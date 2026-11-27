@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Camera, Upload, Info, AlertCircle, CheckCircle, Edit3, PlayCircle, ArrowRight, Layers, Sparkles, PackageCheck, PlusCircle, Trash2, QrCode, ShieldAlert, AlertTriangle } from 'lucide-react';
 import { UploadBox, CaptureBox } from '../components/ui/UploadBox';
+import LiveCameraScanner from '../components/camera/LiveCameraScanner';
 import { ProgressStepper, ConfidenceBar } from '../components/ui/ProgressStepper';
 import Button from '../components/ui/Button';
 import ImageGallery from '../components/evidence/ImageGallery';
@@ -9,7 +10,7 @@ import { useOCR } from '../hooks/useOCR';
 import { PRODUCT_CATEGORIES, detectCategoryFromText } from '../services/ruleEngine/productCategories';
 import { findMatchingProducts } from '../services/products/productMatcher';
 import { analyzeImageQuality } from '../services/imageProcessing/imageQualityAnalyzer';
-import { preprocessImage, evaluateOcrSharpenRetry } from '../services/imageProcessing/imagePreprocessor';
+import { preprocessImage, evaluateOcrSharpenRetry, rotateImageFile } from '../services/imageProcessing/imagePreprocessor';
 import { detectBarcodes } from '../services/barcode/barcodeService';
 import { fuseMultiImageScan } from '../services/inspection/dataFusionService';
 import { attachVisualEvidence, calculateEvidenceCoverage } from '../services/evidence/evidenceMapperService';
@@ -104,6 +105,7 @@ export default function ScanProduct() {
       setQualityWarnings(prev => [...prev, `${imageType}: ${quality.warning}`]);
     }
     toast.success(`Added ${imageType} (${quality.quality} quality)`);
+    return imageObj;
   }, [nextImageType]);
 
   // Restore active scan session from sessionStorage on mount (BUG-01)
@@ -136,6 +138,33 @@ export default function ScanProduct() {
     }
   }, [labelImages, fusionResult, editedData, selectedCategory, combinedRawText, qualityWarnings, barcodeResults]);
 
+  const handleInstantScanFromCamera = async (file, imageType) => {
+    const preview = URL.createObjectURL(file);
+    const quality = await analyzeImageQuality(file);
+    const previewDataUrl = await createSerializableImageThumbnail(file, 600, 0.75);
+
+    const imageObj = {
+      imageId: `IMG-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      file,
+      fileName: file.name,
+      fileSize: file.size,
+      imageType: imageType || nextImageType,
+      preview,
+      previewDataUrl: previewDataUrl || preview,
+      url: preview,
+      quality,
+      qualityScore: quality.score,
+      qualityStatus: quality.quality,
+      createdAt: new Date().toISOString(),
+      isDemoPreset: false,
+    };
+
+    const nextList = [...labelImages, imageObj];
+    setLabelImages(nextList);
+    toast.success(`Captured ${imageObj.imageType} — starting instant scan!`);
+    await handleAnalyze(nextList);
+  };
+
   const handleSelectPreset = (sample) => {
     const dummyFile = new File(['sample content'], sample.file, { type: 'image/png' });
     if (sample.category) {
@@ -157,6 +186,31 @@ export default function ScanProduct() {
     toast.success('Label image removed');
   };
 
+  const handleRotateImage = async (idOrIdx) => {
+    const targetIdx = labelImages.findIndex((img, idx) => img.imageId === idOrIdx || idx === idOrIdx);
+    if (targetIdx === -1) return;
+    const target = labelImages[targetIdx];
+    if (target.isDemoPreset || !target.file) return;
+
+    try {
+      const rotated = await rotateImageFile(target.file, 90);
+      if (!rotated) return;
+      if (target.preview && target.preview.startsWith('blob:')) {
+        try { URL.revokeObjectURL(target.preview); } catch (_) {}
+      }
+      setLabelImages(prev =>
+        prev.map((item, idx) =>
+          idx === targetIdx
+            ? { ...item, file: rotated.file, preview: rotated.preview, url: rotated.preview }
+            : item
+        )
+      );
+      toast.success(`Rotated ${target.imageType} 90°`);
+    } catch {
+      toast.error('Could not rotate image');
+    }
+  };
+
   const handleClear = () => {
     clearActiveScanSession();
     setLabelImages([]);
@@ -174,8 +228,12 @@ export default function ScanProduct() {
     reset();
   };
 
-  const handleAnalyze = async () => {
-    if (labelImages.length === 0) {
+  const handleAnalyze = async (overrideImages = null) => {
+    const imagesToProcess = (Array.isArray(overrideImages) && overrideImages.length > 0)
+      ? overrideImages
+      : labelImages;
+
+    if (imagesToProcess.length === 0) {
       toast.error('Please upload or capture at least one product label image.');
       return;
     }
@@ -195,10 +253,8 @@ export default function ScanProduct() {
         await new Promise(r => setTimeout(r, 150));
       }
 
-      // Process each image through Preprocessing, OCR, Barcode & Quality
-      for (const img of labelImages) {
-        let ocrTarget = img.file;
-        let preprocessedInfo = null;
+      // Process each image through Orientation-Aware Multi-Variant Preprocessing, OCR, Barcode & Quality
+      for (const img of imagesToProcess) {
         const imgMeta = {
           imageId: img.imageId,
           imageType: img.imageType,
@@ -209,33 +265,7 @@ export default function ScanProduct() {
           img.quality?.metrics?.laplacianVariance < 90 ||
           (Array.isArray(img.quality?.flags) && img.quality.flags.some(f => typeof f === 'string' && f.toLowerCase().includes('blur')));
 
-        // 1. Run genuine Canvas Preprocessing BEFORE OCR (conditionally sharpens if blur detected)
-        try {
-          preprocessedInfo = await preprocessImage(img.file, {
-            grayscale: true,
-            contrastEnhance: true,
-            sharpen: 'auto',
-            quality: img.quality,
-          });
-          if (preprocessedInfo?.processedBlob) {
-            ocrTarget = preprocessedInfo.processedBlob;
-            img.preprocessed = preprocessedInfo;
-          }
-        } catch (prepErr) {
-          console.warn(`Preprocessing fallback triggered for ${img.fileName}:`, prepErr);
-        }
-
-        // 2. OCR extraction using preprocessed image (or original fallback)
-        let res = await startScan(ocrTarget, img.isDemoPreset || false, imgMeta);
-
-        // Color-preservation fallback: if grayscale/contrast preprocessing yielded minimal text
-        // on colored packaging, retry OCR on the original uploaded image and keep richer output.
-        if (!img.isDemoPreset && ocrTarget !== img.file && (!res?.rawText || res.rawText.trim().length < 15)) {
-          const origRes = await startScan(img.file, false, imgMeta);
-          if (origRes && (origRes.rawText || '').trim().length > (res?.rawText || '').trim().length) {
-            res = origRes;
-          }
-        }
+        let res = await startScan(img.file, img.isDemoPreset || false, imgMeta);
 
         // 3. OCR Sharpening Retry Pass (BUG-02):
         // If image was blurry or important declarations were missing and first pass wasn't sharpened,
@@ -268,7 +298,8 @@ export default function ScanProduct() {
         }
 
         if (res?.rawText && res.rawText.trim()) {
-          rawTextSegments.push(`[${img.imageType} — ${img.fileName}]\n${res.rawText.trim()}`);
+          const rotNote = res.appliedRotation ? ` (Auto-rotated ${res.appliedRotation}°)` : '';
+          rawTextSegments.push(`[${img.imageType} — ${img.fileName}${rotNote}]\n${res.rawText.trim()}`);
         }
 
         // 3. Barcode detection (genuine browser BarcodeDetector with demo fallback)
@@ -400,7 +431,7 @@ export default function ScanProduct() {
     // Save Scan Record (uses persistent Base64 previewDataUrls so history thumbnails never break)
     const scanRecord = createScan({
       productId: activeProduct.productId,
-      images: labelImages.map(img => img.previewDataUrl || img.preview),
+      images: (imagesToProcess || labelImages).map(img => img.previewDataUrl || img.preview),
       rawOCRData: { text: combinedRawText || ocrResult?.rawText || 'Multi-Image Fusion OCR' },
       normalizedData: mappedWithEvidence,
       category: selectedCategory,
@@ -451,12 +482,20 @@ export default function ScanProduct() {
           evidenceCoverage: coverage.coveragePercentage,
           fusionResult,
         },
-        imageUrl: labelImages[0]?.preview,
+        imageUrl: imagesToProcess[0]?.preview,
         categoryId: selectedCategory,
-        labelImages,
+        labelImages: imagesToProcess,
       },
     });
   };
+
+  const activeFusedData = fusionResult?.unifiedData || ocrResult?.extractedData || {};
+  const hasGenuineDeclarations = Object.entries(activeFusedData).some(([k, v]) =>
+    ['productName', 'mrp', 'netQuantity', 'manufacturer'].includes(k) &&
+    v?.value &&
+    v?.confidence >= 0.70 &&
+    v?.status !== 'NOT_DETECTED'
+  );
 
   return (
     <div className="max-w-4xl animate-fade-in space-y-6">
@@ -495,11 +534,40 @@ export default function ScanProduct() {
       {/* Upload & Multi-Image Section */}
       {(stage === 'idle' || stage === 'processing' || isAnalyzing) && (
         <div className="card space-y-5">
-          <div className="flex items-center justify-between border-b border-border pb-3 flex-wrap gap-2">
-            <h2 className="text-sm font-bold text-navy flex items-center gap-2">
-              <Upload className="w-4 h-4 text-primary" />
-              Add Label Images ({labelImages.length} Uploaded)
-            </h2>
+          {/* Input Method Toggle Tabs */}
+          <div className="flex items-center justify-between border-b border-border pb-3 flex-wrap gap-3">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                id="tab-upload-images"
+                onClick={() => setActiveTab('upload')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                  activeTab === 'upload'
+                    ? 'bg-primary text-white shadow-sm'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                <Upload className="w-4 h-4" />
+                Upload Images
+              </button>
+
+              <button
+                type="button"
+                id="tab-camera-scanner"
+                onClick={() => setActiveTab('camera')}
+                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all ${
+                  activeTab === 'camera'
+                    ? 'bg-gradient-to-r from-teal-600 to-emerald-600 text-white shadow-md'
+                    : 'bg-slate-100 text-slate-700 hover:bg-teal-50 hover:text-teal-700'
+                }`}
+              >
+                <Camera className="w-4 h-4 text-emerald-400" />
+                <span>Live Camera Scanner</span>
+                <span className="text-[10px] tracking-wider px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-700 font-extrabold uppercase">
+                  Counter Scan
+                </span>
+              </button>
+            </div>
 
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-slate-600">Label Type:</span>
@@ -515,22 +583,47 @@ export default function ScanProduct() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {activeTab === 'upload' ? (
+          {activeTab === 'upload' ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <UploadBox
                 onFileSelect={(file) => handleAddImage(file, nextImageType, false)}
                 error={error}
               />
-            ) : (
-              <CaptureBox onFileSelect={(file) => handleAddImage(file, nextImageType, false)} />
-            )}
 
-            {/* Uploaded Gallery */}
-            <ImageGallery
-              images={labelImages}
-              onRemove={handleRemoveImage}
-            />
-          </div>
+              {/* Uploaded Gallery */}
+              <ImageGallery
+                images={labelImages}
+                onRemove={handleRemoveImage}
+                onRotate={handleRotateImage}
+              />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <LiveCameraScanner
+                initialLabelType={nextImageType}
+                onCapture={(file, type, instant) => {
+                  if (!instant) {
+                    handleAddImage(file, type, false);
+                  }
+                }}
+                onInstantScan={handleInstantScanFromCamera}
+                onClose={() => setActiveTab('upload')}
+                autoScanAvailable={!isAnalyzing && stage !== 'processing'}
+              />
+
+              {/* Uploaded Gallery below camera */}
+              {labelImages.length > 0 && (
+                <div className="pt-2">
+                  <h3 className="text-xs font-bold text-slate-700 mb-2">Captured / Uploaded Labels ({labelImages.length}):</h3>
+                  <ImageGallery
+                    images={labelImages}
+                    onRemove={handleRemoveImage}
+                    onRotate={handleRotateImage}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Quality Warning Notifications */}
           {qualityWarnings.length > 0 && (
@@ -604,15 +697,20 @@ export default function ScanProduct() {
             </div>
           )}
 
-          {/* SPARSE / NO OCR TEXT ADVISORY */}
-          {!combinedRawText.trim() && !labelImages.some(img => img.isDemoPreset) && (
-            <div className="card bg-amber-50 border border-amber-200 p-4">
+          {/* NO GENUINE PRODUCT DETECTED ALERT BANNER */}
+          {!hasGenuineDeclarations && !labelImages.some(img => img.isDemoPreset) && (
+            <div className="card bg-amber-50 border-2 border-amber-300 p-4 shadow-sm">
               <div className="flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-                <div className="text-xs text-amber-900">
-                  <div className="font-bold">Limited text recognized from uploaded photo</div>
-                  <p className="mt-0.5 opacity-90">
-                    The photo may be blurred, angled, or low-contrast. You can enter or correct product declarations below and still generate your compliance screening results.
+                <AlertTriangle className="w-6 h-6 text-amber-600 flex-shrink-0 mt-0.5" />
+                <div className="flex-1">
+                  <h3 className="text-sm font-bold text-amber-950 flex items-center gap-2">
+                    No Genuine Packaged Commodity Declarations Detected
+                  </h3>
+                  <p className="text-xs text-amber-900 mt-1">
+                    The camera snapshot does not appear to contain a readable packaged product or statutory declarations (such as MRP, Net Quantity, Brand Name, or Manufacturer).
+                  </p>
+                  <p className="text-xs text-slate-700 mt-1.5 font-semibold">
+                    👉 <strong>Action Required:</strong> Point the camera directly at a real product packet (such as Tata Salt, Soap, Oil, Rice) with clear lighting, or enter the values manually below.
                   </p>
                 </div>
               </div>
@@ -729,17 +827,17 @@ export default function ScanProduct() {
                         <span className="text-xs text-red-600 font-bold flex items-center gap-1">
                           <AlertTriangle className="w-3 h-3" /> Conflict
                         </span>
-                      ) : needsManualReview ? (
+                      ) : !displayVal || conf === 0 ? (
+                        <span className="text-xs text-slate-500 font-bold flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3 text-slate-400" /> Not Detected
+                        </span>
+                      ) : needsManualReview || conf < 0.75 ? (
                         <span className="text-xs text-amber-700 font-bold flex items-center gap-1">
                           <AlertCircle className="w-3 h-3" /> Needs Review ({Math.round(conf * 100)}%)
                         </span>
-                      ) : conf > 0 ? (
+                      ) : (
                         <span className="text-xs text-success flex items-center gap-1">
                           <CheckCircle className="w-3 h-3" /> Verified ({Math.round(conf * 100)}%)
-                        </span>
-                      ) : (
-                        <span className="text-xs text-amber-700 font-bold flex items-center gap-1">
-                          <AlertCircle className="w-3 h-3" /> Not Detected
                         </span>
                       )}
                     </div>

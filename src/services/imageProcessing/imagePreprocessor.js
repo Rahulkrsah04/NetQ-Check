@@ -437,3 +437,368 @@ export async function preprocessImage(originalImage, options = {}) {
     };
   }
 }
+
+/**
+ * Computes OCR-optimal dimensions: upscales low-res phone photos (< minLongest) up to 2.4x
+ * so small statutory print meets Tesseract LSTM x-height requirements, while capping at maxLongest.
+ * @param {number} origWidth
+ * @param {number} origHeight
+ * @param {number} [minLongest=1800]
+ * @param {number} [maxLongest=2400]
+ * @returns {{ width: number, height: number, scale: number, isScaled: boolean }}
+ */
+export function calculateOcrDimensions(origWidth, origHeight, minLongest = 2048, maxLongest = 2500) {
+  if (!origWidth || !origHeight || origWidth <= 0 || origHeight <= 0) {
+    return { width: 2048, height: 1536, scale: 1, isScaled: false };
+  }
+
+  const longest = Math.max(origWidth, origHeight);
+  if (longest > maxLongest) {
+    const scale = maxLongest / longest;
+    return {
+      width: Math.round(origWidth * scale),
+      height: Math.round(origHeight * scale),
+      scale,
+      isScaled: true,
+    };
+  }
+
+  if (longest < minLongest) {
+    const scale = Math.min(2.4, minLongest / longest);
+    return {
+      width: Math.round(origWidth * scale),
+      height: Math.round(origHeight * scale),
+      scale,
+      isScaled: true,
+    };
+  }
+
+  return {
+    width: origWidth,
+    height: origHeight,
+    scale: 1,
+    isScaled: false,
+  };
+}
+
+/**
+ * Applies mild 4-neighbor unsharp masking to sharpen small compressed label text.
+ * Modifies and returns a new ImageData-compatible object `{ width, height, data }`.
+ * @param {{ width: number, height: number, data: Uint8ClampedArray }} imageData
+ * @param {number} [amount=0.65]
+ * @returns {{ width: number, height: number, data: Uint8ClampedArray }}
+ */
+export function applyUnsharpMask(imageData, amount = 0.65) {
+  if (!imageData || !imageData.data || !imageData.width || !imageData.height) return imageData;
+  const { width, height, data } = imageData;
+  const out = new Uint8ClampedArray(data.length);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      if (x === 0 || y === 0 || x === width - 1 || y === height - 1) {
+        out[idx] = data[idx];
+        out[idx + 1] = data[idx + 1];
+        out[idx + 2] = data[idx + 2];
+        out[idx + 3] = data[idx + 3];
+        continue;
+      }
+      const upIdx = ((y - 1) * width + x) * 4;
+      const downIdx = ((y + 1) * width + x) * 4;
+      const leftIdx = idx - 4;
+      const rightIdx = idx + 4;
+
+      for (let c = 0; c < 3; c++) {
+        const center = data[idx + c];
+        const blur = (data[upIdx + c] + data[downIdx + c] + data[leftIdx + c] + data[rightIdx + c]) * 0.25;
+        const sharpened = Math.round(center + amount * (center - blur));
+        out[idx + c] = sharpened < 0 ? 0 : sharpened > 255 ? 255 : sharpened;
+      }
+      out[idx + 3] = data[idx + 3];
+    }
+  }
+
+  return { width, height, data: out };
+}
+
+/**
+ * O(W*H) integral-image local background normalization for colored packaging, folds & shadows.
+ * - channel='max': uses max(R,G,B) so dark ink on bright orange/red/yellow packaging pops out cleanly.
+ * - channel='min_inv': uses 255 - min(R,G,B) so white/light text on dark or saturated colored panels becomes dark-on-light.
+ * - channel='luma': standard ITU-R BT.601 luminance.
+ * @param {{ width: number, height: number, data: Uint8ClampedArray }} imageData
+ * @param {number} [radius=28]
+ * @param {'max'|'min_inv'|'luma'} [channel='max']
+ * @returns {{ width: number, height: number, data: Uint8ClampedArray }}
+ */
+export function applyLocalContrastNormalization(imageData, radius = 28, channel = 'max') {
+  if (!imageData || !imageData.data || !imageData.width || !imageData.height) return imageData;
+  const { width, height, data } = imageData;
+  const numPixels = width * height;
+  const gray = new Float32Array(numPixels);
+
+  for (let i = 0; i < numPixels; i++) {
+    const idx = i * 4;
+    if (channel === 'max') {
+      gray[i] = Math.max(data[idx], data[idx + 1], data[idx + 2]);
+    } else if (channel === 'min_inv') {
+      gray[i] = 255 - Math.min(data[idx], data[idx + 1], data[idx + 2]);
+    } else {
+      gray[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+    }
+  }
+
+  const w1 = width + 1;
+  const integ = new Float64Array((width + 1) * (height + 1));
+  for (let y = 0; y < height; y++) {
+    let rowSum = 0;
+    const rowOff = y * width;
+    const integRow = (y + 1) * w1;
+    const prevIntegRow = y * w1;
+    for (let x = 0; x < width; x++) {
+      rowSum += gray[rowOff + x];
+      integ[integRow + x + 1] = integ[prevIntegRow + x + 1] + rowSum;
+    }
+  }
+
+  const out = new Uint8ClampedArray(data.length);
+  for (let y = 0; y < height; y++) {
+    const y0 = y - radius < 0 ? 0 : y - radius;
+    const y1 = y + radius >= height ? height - 1 : y + radius;
+    const topOff = y0 * w1;
+    const botOff = (y1 + 1) * w1;
+
+    for (let x = 0; x < width; x++) {
+      const x0 = x - radius < 0 ? 0 : x - radius;
+      const x1 = x + radius >= width ? width - 1 : x + radius;
+      const count = (x1 - x0 + 1) * (y1 - y0 + 1);
+      const sum = integ[botOff + x1 + 1] - integ[topOff + x1 + 1] - integ[botOff + x0] + integ[topOff + x0];
+      const mean = sum / count;
+      const diff = gray[y * width + x] - mean;
+      const raw = Math.round(212 + diff * 3.0);
+      const val = raw < 0 ? 0 : raw > 255 ? 255 : raw;
+      const d = (y * width + x) * 4;
+      out[d] = val;
+      out[d + 1] = val;
+      out[d + 2] = val;
+      out[d + 3] = data[d + 3];
+    }
+  }
+
+  return { width, height, data: out };
+}
+
+/**
+ * Pure pixel-buffer clockwise rotation (0, 90, 180, 270 degrees).
+ * @param {{ width: number, height: number, data: Uint8ClampedArray }} imageData
+ * @param {number} degrees
+ * @returns {{ width: number, height: number, data: Uint8ClampedArray }}
+ */
+export function rotateImageData(imageData, degrees = 0) {
+  if (!imageData || !imageData.data) return imageData;
+  const norm = ((degrees % 360) + 360) % 360;
+  if (norm === 0) return imageData;
+
+  const { width, height, data } = imageData;
+  const out = new Uint8ClampedArray(data.length);
+
+  if (norm === 180) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const s = (y * width + x) * 4;
+        const d = ((height - 1 - y) * width + (width - 1 - x)) * 4;
+        out[d] = data[s];
+        out[d + 1] = data[s + 1];
+        out[d + 2] = data[s + 2];
+        out[d + 3] = data[s + 3];
+      }
+    }
+    return { width, height, data: out };
+  }
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const s = (y * width + x) * 4;
+      const nx = norm === 90 ? height - 1 - y : y;
+      const ny = norm === 90 ? x : width - 1 - x;
+      const d = (ny * height + nx) * 4;
+      out[d] = data[s];
+      out[d + 1] = data[s + 1];
+      out[d + 2] = data[s + 2];
+      out[d + 3] = data[s + 3];
+    }
+  }
+
+  return { width: height, height: width, data: out };
+}
+
+async function loadImageIntoCanvasSource(imageInput) {
+  const isRealBlobOrFile = typeof Blob !== 'undefined' && imageInput instanceof Blob;
+  let sourceUrl = isRealBlobOrFile ? URL.createObjectURL(imageInput) : imageInput;
+  const tempUrlCreated = isRealBlobOrFile;
+
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.crossOrigin = 'anonymous';
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Failed to load image for OCR preprocessing'));
+      image.src = sourceUrl;
+    });
+    return img;
+  } finally {
+    if (tempUrlCreated && sourceUrl) {
+      try { URL.revokeObjectURL(sourceUrl); } catch (_) {}
+    }
+  }
+}
+
+function drawRotatedAndScaledToCanvas(img, rotationDegrees = 0, minDimension = 2048, maxDimension = 2500) {
+  const norm = ((rotationDegrees % 360) + 360) % 360;
+  const origW = img.naturalWidth || img.width;
+  const origH = img.naturalHeight || img.height;
+  const rotW = (norm === 90 || norm === 270) ? origH : origW;
+  const rotH = (norm === 90 || norm === 270) ? origW : origH;
+
+  const { width, height } = calculateOcrDimensions(rotW, rotH, minDimension, maxDimension);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas 2D rendering context unavailable');
+
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  ctx.save();
+  if (norm === 90) {
+    ctx.translate(width, 0);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(img, 0, 0, height, width);
+  } else if (norm === 180) {
+    ctx.translate(width, height);
+    ctx.rotate(Math.PI);
+    ctx.drawImage(img, 0, 0, width, height);
+  } else if (norm === 270) {
+    ctx.translate(0, height);
+    ctx.rotate(-Math.PI / 2);
+    ctx.drawImage(img, 0, 0, height, width);
+  } else {
+    ctx.drawImage(img, 0, 0, width, height);
+  }
+  ctx.restore();
+
+  return { canvas, ctx, width, height, originalDimensions: { width: origW, height: origH }, rotatedDimensions: { width: rotW, height: rotH } };
+}
+
+async function imageDataToPngBlob(width, height, data) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  const outImgData = new ImageData(new Uint8ClampedArray(data), width, height);
+  ctx.putImageData(outImgData, 0, 0);
+  return new Promise((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
+}
+
+/**
+ * Generates OCR-ready image variants in browser Canvas (upscaled sharpened color,
+ * local-contrast max-RGB for dark text on orange/colored labels, and local-contrast inverted
+ * for white text on dark/colored panels) at a specified rotation angle.
+ * @param {File|Blob|string} originalImage
+ * @param {Object} [options={}]
+ * @returns {Promise<Object>}
+ */
+export async function generateOcrVariants(originalImage, options = {}) {
+  const {
+    rotationDegrees = 0,
+    minDimension = 2048,
+    maxDimension = 2500,
+    variants = ['sharpenedColor', 'localContrastMax', 'localContrastInv'],
+  } = options;
+
+  const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined' && typeof document.createElement === 'function';
+  const isRealBlobOrFile = typeof Blob !== 'undefined' && originalImage instanceof Blob;
+  const isImageUrl = typeof originalImage === 'string' && (originalImage.startsWith('data:') || originalImage.startsWith('blob:') || originalImage.startsWith('http'));
+
+  if (!isBrowser || (!isRealBlobOrFile && !isImageUrl)) {
+    return { isGenerated: false, variants: {}, dimensions: { width: 0, height: 0 }, appliedRotation: 0 };
+  }
+
+  try {
+    const img = await loadImageIntoCanvasSource(originalImage);
+    const { ctx, width, height, originalDimensions } = drawRotatedAndScaledToCanvas(img, rotationDegrees, minDimension, maxDimension);
+    const baseImageData = ctx.getImageData(0, 0, width, height);
+    const sharpened = applyUnsharpMask(baseImageData, 0.70);
+
+    const blobs = {};
+    if (variants.includes('sharpenedColor')) {
+      blobs.sharpenedColor = await imageDataToPngBlob(width, height, sharpened.data);
+    }
+    if (variants.includes('localContrastMax')) {
+      const maxNorm = applyLocalContrastNormalization(sharpened, 28, 'max');
+      blobs.localContrastMax = await imageDataToPngBlob(width, height, maxNorm.data);
+    }
+    if (variants.includes('localContrastInv')) {
+      const invNorm = applyLocalContrastNormalization(sharpened, 28, 'min_inv');
+      blobs.localContrastInv = await imageDataToPngBlob(width, height, invNorm.data);
+    }
+
+    return {
+      isGenerated: true,
+      variants: blobs,
+      dimensions: { width, height },
+      originalDimensions,
+      appliedRotation: ((rotationDegrees % 360) + 360) % 360,
+    };
+  } catch (err) {
+    console.warn('OCR variant generation fallback:', err.message);
+    return { isGenerated: false, variants: {}, dimensions: { width: 0, height: 0 }, appliedRotation: 0 };
+  }
+}
+
+/**
+ * Rotates an uploaded File/Blob clockwise by `degrees` in browser Canvas
+ * and returns a new File + object URL preview for manual gallery rotation.
+ */
+export async function rotateImageFile(imageFile, degrees = 90) {
+  const isBrowser = typeof window !== 'undefined' && typeof document !== 'undefined' && typeof document.createElement === 'function';
+  if (!isBrowser || !imageFile) return null;
+
+  const img = await loadImageIntoCanvasSource(imageFile);
+  const norm = ((degrees % 360) + 360) % 360;
+  const origW = img.naturalWidth || img.width;
+  const origH = img.naturalHeight || img.height;
+  const rotW = (norm === 90 || norm === 270) ? origH : origW;
+  const rotH = (norm === 90 || norm === 270) ? origW : origH;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = rotW;
+  canvas.height = rotH;
+  const ctx = canvas.getContext('2d');
+  ctx.save();
+  if (norm === 90) {
+    ctx.translate(rotW, 0);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(img, 0, 0, origW, origH);
+  } else if (norm === 180) {
+    ctx.translate(rotW, rotH);
+    ctx.rotate(Math.PI);
+    ctx.drawImage(img, 0, 0, origW, origH);
+  } else if (norm === 270) {
+    ctx.translate(0, rotH);
+    ctx.rotate(-Math.PI / 2);
+    ctx.drawImage(img, 0, 0, origW, origH);
+  } else {
+    ctx.drawImage(img, 0, 0, origW, origH);
+  }
+  ctx.restore();
+
+  const blob = await new Promise((resolve) => canvas.toBlob((b) => resolve(b), imageFile.type || 'image/jpeg', 0.95));
+  if (!blob) return null;
+  const rotatedFile = new File([blob], imageFile.name || 'rotated_label.jpg', { type: blob.type });
+  const preview = URL.createObjectURL(rotatedFile);
+  return { file: rotatedFile, preview };
+}
+

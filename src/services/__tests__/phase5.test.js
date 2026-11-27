@@ -15,8 +15,11 @@ import {
 import {
   preprocessImage,
   calculateScaledDimensions,
+  calculateOcrDimensions,
   applyLuminanceGrayscale,
   applyAdaptiveContrastStretching,
+  applyLocalContrastNormalization,
+  rotateImageData,
 } from '../imageProcessing/imagePreprocessor.js';
 import { detectBarcodes } from '../barcode/barcodeService.js';
 import { attachVisualEvidence, calculateEvidenceCoverage } from '../evidence/evidenceMapperService.js';
@@ -155,6 +158,31 @@ export async function runPhase5TestSuite() {
   // Fallback behavior test
   const fallbackRes = await preprocessImage(null);
   assert(fallbackRes.originalImage !== null && !fallbackRes.isPreprocessed, 'Handles invalid/null inputs gracefully with fallback object');
+
+  // OCR-optimal upscaling, local contrast normalization & pixel rotation
+  const ocrUp = calculateOcrDimensions(768, 1024, 2048, 2500);
+  assert(ocrUp.width === 1536 && ocrUp.height === 2048 && ocrUp.isScaled, 'calculateOcrDimensions upscales 768x1024 low-res mobile photo to 1536x2048');
+
+  // Orange background (240, 110, 10) with black text pixel (20, 20, 20) vs white text pixel (250, 250, 250)
+  const colorPatch = new Uint8ClampedArray(9 * 4);
+  for (let i = 0; i < 9; i++) {
+    colorPatch[i * 4] = 240; colorPatch[i * 4 + 1] = 110; colorPatch[i * 4 + 2] = 10; colorPatch[i * 4 + 3] = 255;
+  }
+  colorPatch[4 * 4] = 20; colorPatch[4 * 4 + 1] = 20; colorPatch[4 * 4 + 2] = 20; // center black text pixel
+  const maxLocal = applyLocalContrastNormalization({ width: 3, height: 3, data: colorPatch }, 2, 'max');
+  assert(maxLocal.data[4 * 4] < maxLocal.data[0], 'applyLocalContrastNormalization(max) keeps dark text on orange background darker than background');
+
+  const whiteOnOrange = new Uint8ClampedArray(9 * 4);
+  for (let i = 0; i < 9; i++) {
+    whiteOnOrange[i * 4] = 240; whiteOnOrange[i * 4 + 1] = 110; whiteOnOrange[i * 4 + 2] = 10; whiteOnOrange[i * 4 + 3] = 255;
+  }
+  whiteOnOrange[4 * 4] = 250; whiteOnOrange[4 * 4 + 1] = 250; whiteOnOrange[4 * 4 + 2] = 250; // center white text pixel
+  const invLocal = applyLocalContrastNormalization({ width: 3, height: 3, data: whiteOnOrange }, 2, 'min_inv');
+  assert(invLocal.data[4 * 4] < invLocal.data[0], 'applyLocalContrastNormalization(min_inv) converts white text on orange background to crisp dark foreground');
+
+  const rotBuf = new Uint8ClampedArray([10, 10, 10, 255, 20, 20, 20, 255]); // 2x1 -> rotated 90 CW becomes 1x2
+  const rot90 = rotateImageData({ width: 2, height: 1, data: rotBuf }, 90);
+  assert(rot90.width === 1 && rot90.height === 2 && rot90.data[0] === 10 && rot90.data[4] === 20, 'rotateImageData rotates 2x1 buffer 90° CW into 1x2');
 
   // 3. Barcode & QR Code Detection Abstraction
   console.log('\n[3] Testing Barcode & QR Scanner Service');
