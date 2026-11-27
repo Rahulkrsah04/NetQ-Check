@@ -1,4 +1,4 @@
-import { useParams, useLocation, Link } from 'react-router-dom';
+import { useParams, useLocation, Link, useNavigate } from 'react-router-dom';
 import { Download, ArrowLeft, Package, AlertTriangle, Layers, ShieldAlert, AlertCircle, FileCheck, CheckCircle2, Search, Info, History, Eye, QrCode } from 'lucide-react';
 import { StatusBadge, StatusIcon, OverallStatusCard } from '../components/ui/StatusBadge';
 import Button from '../components/ui/Button';
@@ -12,6 +12,7 @@ import { getProductById } from '../services/repositories/productRepository';
 import { getEvidenceByScanId } from '../services/repositories/evidenceRepository';
 import { saveReport } from '../services/repositories/reportRepository';
 import { attachVisualEvidence, calculateEvidenceCoverage } from '../services/evidence/evidenceMapperService';
+import { clearActiveScanSession } from '../services/inspection/scanSessionService';
 import { useAuth } from '../contexts/AuthContext';
 import { format } from 'date-fns';
 import { useState } from 'react';
@@ -45,10 +46,15 @@ export function getDisplayValue(field, fallback = '—') {
 export default function ComplianceResult() {
   const { id } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [downloading, setDownloading] = useState(false);
   const [isEvidenceModalOpen, setIsEvidenceModalOpen] = useState(false);
   const [selectedEvidenceIndex, setSelectedEvidenceIndex] = useState(0);
+
+  const handleBack = () => {
+    navigate('/scan');
+  };
 
   // Get data: from navigation state (new scan) or from DB repository or fallback to demo
   const stateData = location.state;
@@ -184,10 +190,15 @@ export default function ComplianceResult() {
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
-          <Link to="/history" className="btn btn-secondary btn-sm">
+          <button
+            onClick={handleBack}
+            className="btn btn-secondary btn-sm flex items-center gap-1.5"
+            id="compliance-back-btn"
+            title="Return to active scan"
+          >
             <ArrowLeft className="w-4 h-4" />
-            Back
-          </Link>
+            Back to Scan
+          </button>
           <div>
             <h1 className="page-title">Compliance Screening Assessment</h1>
             <p className="page-desc">Assessment ID: <strong className="font-mono text-navy">{audit.assessmentId || id || 'ASM-NEW'}</strong> · {scanDate}</p>
@@ -382,10 +393,15 @@ export default function ComplianceResult() {
         <Button variant="primary" icon={Download} loading={downloading} onClick={handleDownloadPDF} id="bottom-download-btn">
           Download PDF Report
         </Button>
-        <Link to="/scan" className="btn btn-secondary">
+        <Link
+          to="/scan"
+          onClick={() => clearActiveScanSession()}
+          className="btn btn-secondary"
+          id="scan-new-product-btn"
+        >
           Scan Another Product
         </Link>
-        <Link to="/history" className="btn btn-secondary">
+        <Link to="/history" className="btn btn-secondary" id="view-history-btn">
           View History
         </Link>
       </div>

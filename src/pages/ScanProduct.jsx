@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Camera, Upload, Info, AlertCircle, CheckCircle, Edit3, PlayCircle, ArrowRight, Layers, Sparkles, PackageCheck, PlusCircle, Trash2, QrCode, ShieldAlert, AlertTriangle } from 'lucide-react';
 import { UploadBox, CaptureBox } from '../components/ui/UploadBox';
@@ -13,6 +13,12 @@ import { preprocessImage } from '../services/imageProcessing/imagePreprocessor';
 import { detectBarcodes } from '../services/barcode/barcodeService';
 import { fuseMultiImageScan } from '../services/inspection/dataFusionService';
 import { attachVisualEvidence, calculateEvidenceCoverage } from '../services/evidence/evidenceMapperService';
+import {
+  saveActiveScanSession,
+  loadActiveScanSession,
+  clearActiveScanSession,
+  createSerializableImageThumbnail,
+} from '../services/inspection/scanSessionService';
 import { saveProduct } from '../services/repositories/productRepository';
 import { createScan } from '../services/repositories/scanRepository';
 import { saveAssessment } from '../services/repositories/assessmentRepository';
@@ -75,6 +81,7 @@ export default function ScanProduct() {
   const handleAddImage = useCallback(async (file, imageType = nextImageType, isDemoPreset = false) => {
     const preview = URL.createObjectURL(file);
     const quality = await analyzeImageQuality(file);
+    const previewDataUrl = await createSerializableImageThumbnail(file, 600, 0.75);
 
     const imageObj = {
       imageId: `IMG-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -83,6 +90,7 @@ export default function ScanProduct() {
       fileSize: file.size,
       imageType,
       preview,
+      previewDataUrl: previewDataUrl || preview,
       url: preview,
       quality,
       qualityScore: quality.score,
@@ -97,6 +105,36 @@ export default function ScanProduct() {
     }
     toast.success(`Added ${imageType} (${quality.quality} quality)`);
   }, [nextImageType]);
+
+  // Restore active scan session from sessionStorage on mount (BUG-01)
+  useEffect(() => {
+    const saved = loadActiveScanSession();
+    if (saved && Array.isArray(saved.labelImages) && saved.labelImages.length > 0) {
+      setLabelImages(saved.labelImages);
+      if (saved.fusionResult) setFusionResult(saved.fusionResult);
+      if (saved.editedData) setEditedData(saved.editedData);
+      if (saved.selectedCategory) setSelectedCategory(saved.selectedCategory);
+      if (saved.combinedRawText) setCombinedRawText(saved.combinedRawText);
+      if (saved.qualityWarnings) setQualityWarnings(saved.qualityWarnings);
+      if (saved.barcodeResults) setBarcodeResults(saved.barcodeResults);
+      toast.success('Restored active inspection session', { id: 'session-restore' });
+    }
+  }, []);
+
+  // Sync active scan session to sessionStorage whenever state updates
+  useEffect(() => {
+    if (labelImages.length > 0) {
+      saveActiveScanSession({
+        labelImages,
+        fusionResult,
+        editedData,
+        selectedCategory,
+        combinedRawText,
+        qualityWarnings,
+        barcodeResults,
+      });
+    }
+  }, [labelImages, fusionResult, editedData, selectedCategory, combinedRawText, qualityWarnings, barcodeResults]);
 
   const handleSelectPreset = (sample) => {
     const dummyFile = new File(['sample content'], sample.file, { type: 'image/png' });
@@ -120,6 +158,7 @@ export default function ScanProduct() {
   };
 
   const handleClear = () => {
+    clearActiveScanSession();
     setLabelImages([]);
     setEditedData({});
     setSelectedCategory('GENERAL_PACKAGED');

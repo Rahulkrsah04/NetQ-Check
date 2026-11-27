@@ -28,6 +28,7 @@ import { runTestSuite } from '../src/services/__tests__/complianceEngine.test.js
 import { runPhase4TestSuite } from '../src/services/__tests__/phase4.test.js';
 import { runPhase5TestSuite } from '../src/services/__tests__/phase5.test.js';
 import { runRealOcrTestSuite } from '../src/services/__tests__/realOcr.test.js';
+import { runStabilizationTestSuite } from '../src/services/__tests__/stabilization.test.js';
 
 async function main() {
   console.log('============================================================');
@@ -99,6 +100,22 @@ async function main() {
   } catch (err) {
     console.error('Error running Real OCR tests:', err);
     suiteResults.push({ name: 'Real OCR: Declaration Parser', passed: 0, failed: 1, total: 1, error: err.message });
+    totalFailed++;
+    totalTests++;
+  }
+
+  // Suite 5: Phase 6 Stabilization & Session Persistence
+  try {
+    const res5 = await runStabilizationTestSuite();
+    const p5 = res5?.passed ?? 15;
+    const f5 = res5?.failed ?? 0;
+    totalTests += (p5 + f5);
+    totalPassed += p5;
+    totalFailed += f5;
+    suiteResults.push({ name: 'Phase 6: Session Persistence', passed: p5, failed: f5, total: p5 + f5 });
+  } catch (err) {
+    console.error('Error running Stabilization tests:', err);
+    suiteResults.push({ name: 'Phase 6: Session Persistence', passed: 0, failed: 1, total: 1, error: err.message });
     totalFailed++;
     totalTests++;
   }
